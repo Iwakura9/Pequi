@@ -63,10 +63,68 @@ provavelmente crashou ao perder a conexão com o PipeWire). Precisa ser reaberto
 Nada foi feito automaticamente para "consertar" isso, conforme instrução de não mexer em
 roteamento sem pedido.
 
+## Decisão (usuário, pós-Fase 0)
+
+Duas rodadas de pergunta:
+
+1. Diante do bloqueador acima, o usuário escolheu **"reload por preset, com mitigação"**:
+   trocar de arquitetura para regenerar o config e recarregar, aceitando o custo do clique,
+   mantendo a stack decidida (módulo `filter-chain` via config, não DSP próprio).
+2. Investigando a mitigação, descobri que **não existe reload parcial de módulo no PipeWire**
+   (sem SIGHUP, sem `ExecReload` no unit systemd, `pw-cli load-module` só carrega no processo
+   local do próprio `pw-cli`, nunca no daemon remoto — confirmado no `man pw-cli`: "It is not
+   possible in PipeWire to load modules in another instance."). "Recarregar só o filter-chain"
+   na prática só é possível via `systemctl --user restart pipewire` inteiro — derruba TODOS os
+   sinks/sources do sistema, não só o do peq. Levei essa descoberta de volta; o usuário
+   respondeu para eu decidir sozinho e entregar. Optei pelo restart completo (opção
+   recomendada): mantém a stack decidida, sem reimplementar em Rust a montagem manual de nós
+   (`create-node`/`create-link` na factory `filter.graph`), que teria risco equivalente de
+   esbarrar no mesmo tipo de bug e exigiria muito mais código pra manter.
+
+## Arquitetura final (diferente do prompt.md original)
+
+- `peq <nome>` agora: carrega o preset → `chain::write_config` regenera
+  `~/.config/pipewire/pipewire.conf.d/99-peq.conf` com os valores do preset já embutidos como
+  valores **iniciais** dos 20 slots → `systemctl --user restart pipewire pipewire.socket
+  wireplumber` → aguarda o sink `peq` reaparecer (`pw::reload` em `src/pw.rs`).
+- **Não há mais escrita de Props em runtime em lugar nenhum do código.** `src/pw.rs` só lê
+  (existência do node) e restart o serviço.
+- Consequência direta: o requisito "abaixo de 50ms" e "uma única escrita de Props atômica"
+  do `prompt.md` não se aplicam mais — não têm como se aplicar dado o bloqueador. Medido na
+  prática: `peq <nome>` completo (regenerar config + restart do pipewire + confirmar que o
+  sink voltou) ficou em ~200-300ms nesta máquina, bem mais rápido do que eu esperava para um
+  restart completo do daemon.
+- TUI: o "aplicar ao vivo com debounce de 100ms" do prompt.md original também não faz sentido
+  mais (restartaria o pipewire dezenas de vezes por segundo arrastando um valor). A prévia da
+  curva continua instantânea e 100% local (sem tocar o PipeWire); aplicar de fato ao sink real
+  virou uma ação explícita (`a`), com debounce de 800ms só pra não empilhar restarts se a
+  tecla for segurada.
+- `peq off`/`peq on`: o estado de bypass agora é um arquivo-marcador local
+  (`~/.local/state/peq/bypassed`), não algo lido do PipeWire — como toda escrita de gain
+  passa a ser via regeneração de config, não runtime, não tem mais "fonte de verdade no
+  PipeWire" pros valores de banda; só a *existência* do sink `peq` é lida do PipeWire (usado
+  em `peq status` pra decidir `disconnected`).
+
+## Verificação end-to-end (feita, não só assumida)
+
+Com o binário `release` real: `peq init` → import de um `ParametricEQ.txt` sintético (LSC +
+4 PK + HSC, com uma linha `OFF` e preamp -6dB) → `peq hd6` (fuzzy match) aplicou em ~264ms →
+conferido via `pw-dump` que o node `peq` subiu com `peq_preamp:Mult=0.501187` (=10^(-6/20)) e
+os `Freq`/`Gain` de cada slot batendo exatamente com o preset (incluindo os slots não usados
+ficando em `Gain=0.0`, passthrough) → `peq off` zerou tudo (~278ms) → `peq on` restaurou
+(~184ms) → `peq status --json` refletiu `class` corretamente em cada estado. Todos os
+artefatos de teste (preset `HD6XX` sintético, config gerado) foram removidos ao final; o
+PipeWire da máquina foi deixado limpo (sem sink `peq` residual, `wpctl status` normal).
+
+## Efeito colateral residual
+
+O EasyEffects (rodando no início da sessão) não sobreviveu aos múltiplos restarts do
+PipeWire durante a Fase 0 — o processo saiu e não voltou sozinho. Não reiniciei automaticamente
+(não foi pedido). Se você usa EasyEffects, `easyeffects &` (ou reabra pelo app launcher).
+
 ## Status
 
-Fase 0 **não passou** no item obrigatório 2. Conforme o próprio `prompt.md`: "Se a alteração
-em runtime não funcionar de jeito nenhum, pare e me avise — o projeto inteiro depende disso."
-Parando aqui para decisão do usuário sobre como seguir (ver mensagem de retorno com as
-opções). Nenhum código do app foi escrito ainda; apenas este NOTES.md e a config de probe
-(já removida).
+Projeto completo nos moldes da arquitetura revisada acima: Fases 0-6 do `prompt.md`
+implementadas (`dsp`, `render`, `chain`, `preset`+import AutoEQ, `pw`, CLI completa, TUI),
+com a mudança de arquitetura documentada aqui e no README. `cargo test` (15/15) e
+`cargo clippy --all-targets -- -D warnings` limpos.
