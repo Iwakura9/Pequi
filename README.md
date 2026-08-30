@@ -1,5 +1,22 @@
 # peq
 
+## ABANDONADO (2026-08-30)
+
+Projeto parado. Motivo: o bloqueador documentado em `NOTES.md` (escrita de bandas em runtime
+não chega ao filter-graph neste PipeWire) forçou uma arquitetura de reload que restarta o
+PipeWire *inteiro* a cada troca de preset — custo alto demais pro que o projeto se propunha.
+
+Nada dele roda ou toca o áudio do sistema hoje: `~/.config/pipewire/pipewire.conf.d/99-peq.conf`
+foi removido, o PipeWire recarregado (sink `peq` descarregado do grafo), o binário instalado
+(`~/.local/bin/peq`) e o diretório `~/.config/peq` apagados. Os presets que existiam lá
+(`May-Ideal.toml`, `F1 Preference2.toml`) foram movidos para `presets/` neste repo. Os curves
+originais em AutoEQ ficam em `!EQ_Profiles/`.
+
+Pra reviver: `cargo build --release`, depois `peq init` (regenera o `99-peq.conf`) e o restart
+do systemd de novo — tudo descrito abaixo continua valendo como estava.
+
+---
+
 A parametric EQ for the terminal, backed by PipeWire's `libpipewire-module-filter-chain`.
 CLI-first (swap headphone EQ curves in one command), with a TUI for editing presets.
 
