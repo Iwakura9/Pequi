@@ -12,11 +12,11 @@ use crate::application;
 use crate::dsp::{preset_response_db, BandType, FS};
 use crate::preset::Preset;
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::{execute, ExecutableCommand};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -34,17 +34,73 @@ enum Field {
 }
 
 pub fn run(preset: Preset) -> Result<()> {
-    enable_raw_mode()?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
+    let _session = TerminalSession::enter(CrosstermTerminalOps)?;
+    let out = stdout();
     let backend = ratatui::backend::CrosstermBackend::new(out);
     let mut terminal = ratatui::Terminal::new(backend)?;
+    event_loop(&mut terminal, preset)
+}
 
-    let result = event_loop(&mut terminal, preset);
+trait TerminalOps {
+    fn enable_raw(&mut self) -> Result<()>;
+    fn enter_alternate(&mut self) -> Result<()>;
+    fn leave_alternate(&mut self) -> Result<()>;
+    fn disable_raw(&mut self) -> Result<()>;
+}
 
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
-    result
+struct CrosstermTerminalOps;
+
+impl TerminalOps for CrosstermTerminalOps {
+    fn enable_raw(&mut self) -> Result<()> {
+        enable_raw_mode().map_err(Into::into)
+    }
+
+    fn enter_alternate(&mut self) -> Result<()> {
+        execute!(stdout(), EnterAlternateScreen).map_err(Into::into)
+    }
+
+    fn leave_alternate(&mut self) -> Result<()> {
+        execute!(stdout(), LeaveAlternateScreen).map_err(Into::into)
+    }
+
+    fn disable_raw(&mut self) -> Result<()> {
+        disable_raw_mode().map_err(Into::into)
+    }
+}
+
+/// Restores terminal modes on normal return, error and panic unwinding.
+struct TerminalSession<T: TerminalOps> {
+    ops: T,
+    raw: bool,
+    alternate: bool,
+}
+
+impl<T: TerminalOps> TerminalSession<T> {
+    fn enter(mut ops: T) -> Result<Self> {
+        ops.enable_raw()?;
+        if let Err(error) = ops.enter_alternate() {
+            let _ = ops.disable_raw();
+            return Err(error);
+        }
+        Ok(Self {
+            ops,
+            raw: true,
+            alternate: true,
+        })
+    }
+}
+
+impl<T: TerminalOps> Drop for TerminalSession<T> {
+    fn drop(&mut self) {
+        if self.alternate {
+            let _ = self.ops.leave_alternate();
+            self.alternate = false;
+        }
+        if self.raw {
+            let _ = self.ops.disable_raw();
+            self.raw = false;
+        }
+    }
 }
 
 struct State {
@@ -136,6 +192,9 @@ fn event_loop(
         };
         if key.kind != KeyEventKind::Press {
             continue;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Ok(());
         }
         state.quit_confirm = state.quit_confirm && key.code == KeyCode::Char('q');
 
@@ -296,5 +355,91 @@ fn field_style(selected: bool) -> Style {
         Style::default().fg(Color::Black).bg(Color::Yellow)
     } else {
         Style::default()
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::{TerminalOps, TerminalSession};
+    use anyhow::{bail, Result};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct FakeOps {
+        calls: Rc<RefCell<Vec<&'static str>>>,
+        fail_alternate: bool,
+    }
+
+    impl TerminalOps for FakeOps {
+        fn enable_raw(&mut self) -> Result<()> {
+            self.calls.borrow_mut().push("enable_raw");
+            Ok(())
+        }
+
+        fn enter_alternate(&mut self) -> Result<()> {
+            self.calls.borrow_mut().push("enter_alternate");
+            if self.fail_alternate {
+                bail!("alternate screen failed")
+            }
+            Ok(())
+        }
+
+        fn leave_alternate(&mut self) -> Result<()> {
+            self.calls.borrow_mut().push("leave_alternate");
+            Ok(())
+        }
+
+        fn disable_raw(&mut self) -> Result<()> {
+            self.calls.borrow_mut().push("disable_raw");
+            Ok(())
+        }
+    }
+
+    fn fake(fail_alternate: bool) -> (FakeOps, Rc<RefCell<Vec<&'static str>>>) {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        (
+            FakeOps {
+                calls: calls.clone(),
+                fail_alternate,
+            },
+            calls,
+        )
+    }
+
+    #[test]
+    fn session_restores_terminal_on_drop() {
+        let (ops, calls) = fake(false);
+        drop(TerminalSession::enter(ops).unwrap());
+        assert_eq!(
+            *calls.borrow(),
+            [
+                "enable_raw",
+                "enter_alternate",
+                "leave_alternate",
+                "disable_raw"
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_entry_rolls_back_raw_mode() {
+        let (ops, calls) = fake(true);
+        assert!(TerminalSession::enter(ops).is_err());
+        assert_eq!(
+            *calls.borrow(),
+            ["enable_raw", "enter_alternate", "disable_raw"]
+        );
+    }
+
+    #[test]
+    fn panic_unwinding_restores_terminal() {
+        let (ops, calls) = fake(false);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _session = TerminalSession::enter(ops).unwrap();
+            panic!("test panic");
+        }));
+        assert!(result.is_err());
+        assert_eq!(calls.borrow().last(), Some(&"disable_raw"));
     }
 }
