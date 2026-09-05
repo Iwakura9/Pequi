@@ -7,7 +7,9 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -215,42 +217,34 @@ pub enum ResolveError {
     },
 }
 
-fn xdg_dir(env_var: &str, home_fallback: &str) -> PathBuf {
-    if let Ok(dir) = std::env::var(env_var) {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    PathBuf::from(home).join(home_fallback)
-}
-
 pub fn preset_dir() -> PathBuf {
-    xdg_dir("XDG_CONFIG_HOME", ".config").join("peq/presets")
+    crate::storage::xdg_preset_dir()
 }
 
 pub fn state_dir() -> PathBuf {
-    xdg_dir("XDG_STATE_HOME", ".local/state").join("peq")
+    xdg_state_dir()
+}
+
+fn xdg_state_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".local/state"));
+    base.join("peq")
 }
 
 /// Sorted list of preset names (file stems) available in `preset_dir()`.
 pub fn list_presets() -> Result<Vec<String>> {
-    let dir = preset_dir();
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
-        .filter_map(|e| {
-            let name = e
-                .path()
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())?;
-            validation::validate_name(&name).ok().map(|()| name)
-        })
-        .collect();
-    names.sort();
-    Ok(names)
+    Ok(crate::storage::PresetStore::from_xdg()
+        .list()?
+        .entries
+        .into_iter()
+        .map(|entry| entry.document.name)
+        .collect())
 }
 
 pub fn preset_path(name: &str) -> Result<PathBuf> {
@@ -259,16 +253,17 @@ pub fn preset_path(name: &str) -> Result<PathBuf> {
 }
 
 pub fn load_preset(name: &str) -> Result<Preset> {
-    let path = preset_path(name)?;
-    load_preset_file(&path)
+    Ok(crate::storage::PresetStore::from_xdg().load(name)?.document)
 }
 
+#[cfg(test)]
 fn load_preset_file(path: &Path) -> Result<Preset> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     parse_preset(&text, path)
 }
 
+#[cfg(test)]
 fn parse_preset(text: &str, path: &Path) -> Result<Preset> {
     let preset: Preset =
         toml::from_str(text).with_context(|| format!("parsing {}", path.display()))?;
@@ -278,12 +273,9 @@ fn parse_preset(text: &str, path: &Path) -> Result<Preset> {
 }
 
 pub fn save_preset(preset: &Preset) -> Result<()> {
-    validation::validate_preset(preset, None)?;
-    let dir = preset_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = preset_path(&preset.name)?;
-    let text = toml::to_string_pretty(preset).context("serializing preset")?;
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    crate::storage::PresetStore::from_xdg()
+        .save(preset, crate::storage::SaveMode::Create)
+        .map(|_| ())
 }
 
 /// Resolve a (possibly partial) name against the available preset list. Tries, in order:
