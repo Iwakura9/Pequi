@@ -304,6 +304,7 @@ fn response_db(preset: &Preset, freq: f64) -> f64 {
         + preset
             .bands
             .iter()
+            .filter(|b| b.enabled)
             .map(|b| band_response_db(b.kind, b.freq, b.gain, b.q, freq))
             .sum::<f64>()
 }

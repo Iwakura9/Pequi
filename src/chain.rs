@@ -39,6 +39,9 @@ pub fn slots_for(preset: &Preset) -> Vec<Slot> {
     let mut highshelf: Option<&Band> = None;
     let mut peakings: Vec<&Band> = Vec::new();
     for b in &preset.bands {
+        if !b.enabled {
+            continue;
+        }
         match b.kind {
             BandType::Lowshelf => lowshelf.get_or_insert(b),
             BandType::Highshelf => highshelf.get_or_insert(b),
@@ -163,12 +166,7 @@ pub fn write_config(preset: &Preset) -> Result<PathBuf> {
 
 /// A silent preset (all gains 0, 0dB preamp) - used by `peq init` and `peq off`.
 pub fn silent_preset(name: &str) -> Preset {
-    Preset {
-        name: name.to_string(),
-        preamp_db: 0.0,
-        match_patterns: Vec::new(),
-        bands: Vec::new(),
-    }
+    Preset::new(name)
 }
 
 #[cfg(test)]
@@ -187,20 +185,24 @@ mod tests {
                     freq: 105.0,
                     gain: -3.5,
                     q: 0.7,
+                    enabled: true,
                 },
                 Band {
                     kind: BandType::Peaking,
                     freq: 1000.0,
                     gain: 2.0,
                     q: 1.0,
+                    enabled: true,
                 },
                 Band {
                     kind: BandType::Highshelf,
                     freq: 8000.0,
                     gain: 1.0,
                     q: 0.7,
+                    enabled: true,
                 },
             ],
+            ..Preset::new("test")
         }
     }
 
@@ -228,5 +230,31 @@ mod tests {
     fn unused_slots_are_passthrough() {
         let slots = slots_for(&sample_preset());
         assert_eq!(slots[2].gain, 0.0); // second peaking slot unused
+    }
+
+    #[test]
+    fn disabled_bands_are_omitted_from_slots() {
+        let mut preset = Preset::new("disabled");
+        preset.bands = vec![
+            Band {
+                kind: BandType::Lowshelf,
+                freq: 120.0,
+                gain: 6.0,
+                q: 0.7,
+                enabled: false,
+            },
+            Band {
+                kind: BandType::Peaking,
+                freq: 1000.0,
+                gain: 2.0,
+                q: 1.0,
+                enabled: true,
+            },
+        ];
+
+        let slots = slots_for(&preset);
+        assert_eq!(slots[0].label, "bq_lowshelf");
+        assert_eq!(slots[0].gain, 0.0);
+        assert_eq!(slots[1].gain, 2.0);
     }
 }

@@ -2,28 +2,205 @@
 
 use crate::dsp::BandType;
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use serde::{de, Deserialize, Deserializer, Serialize};
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MAX_PEAKING_BANDS: usize = 18;
+/// Version of the TOML document format understood by this build.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Band {
     #[serde(rename = "type")]
     pub kind: BandType,
     pub freq: f64,
     pub gain: f64,
     pub q: f64,
+    /// Whether this band participates in the rendered curve and audio graph.
+    /// Missing `enabled` in a legacy document means enabled.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Preset {
+fn default_enabled() -> bool {
+    true
+}
+
+/// A versioned preset document.
+///
+/// `schema_version` and `id` are emitted for new documents. Legacy TOML without
+/// either field is accepted and receives a deterministic in-memory ID based on
+/// its content; loading never writes that upgraded representation back to disk.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PresetDocument {
+    pub schema_version: u32,
+    pub id: String,
     pub name: String,
+    #[serde(default)]
     pub preamp_db: f64,
     #[serde(rename = "match", default, skip_serializing_if = "Vec::is_empty")]
     pub match_patterns: Vec<String>,
     #[serde(rename = "band", default)]
     pub bands: Vec<Band>,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+}
+
+/// Compatibility name retained for existing chain, CLI and TUI consumers.
+pub type Preset = PresetDocument;
+
+#[derive(Debug, Deserialize)]
+struct PresetWire {
+    #[serde(default)]
+    schema_version: Option<u32>,
+    #[serde(default)]
+    id: Option<String>,
+    name: String,
+    #[serde(default)]
+    preamp_db: f64,
+    #[serde(rename = "match", default)]
+    match_patterns: Vec<String>,
+    #[serde(rename = "band", default)]
+    bands: Vec<Band>,
+    #[serde(default)]
+    favorite: bool,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for PresetDocument {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PresetWire::deserialize(deserializer)?;
+        if let Some(version) = wire.schema_version {
+            if version != CURRENT_SCHEMA_VERSION {
+                return Err(de::Error::custom(format!(
+                    "unsupported preset schema version {version}; supported version is {CURRENT_SCHEMA_VERSION}"
+                )));
+            }
+        }
+
+        let mut document = Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            id: wire.id.unwrap_or_default(),
+            name: wire.name,
+            preamp_db: wire.preamp_db,
+            match_patterns: wire.match_patterns,
+            bands: wire.bands,
+            favorite: wire.favorite,
+            metadata: wire.metadata,
+        };
+        if document.id.trim().is_empty() {
+            document.id = legacy_id(&document);
+        }
+        Ok(document)
+    }
+}
+
+impl PresetDocument {
+    /// Construct a new document with a fresh stable identity.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            id: new_id(),
+            name: name.into(),
+            preamp_db: 0.0,
+            match_patterns: Vec::new(),
+            bands: Vec::new(),
+            favorite: false,
+            metadata: BTreeMap::new(),
+        }
+    }
+}
+
+fn new_id() -> String {
+    let mut bytes = [0u8; 16];
+    if let Ok(mut random) = File::open("/dev/urandom") {
+        if random.read_exact(&mut bytes).is_ok() {
+            return format_id(&bytes);
+        }
+    }
+
+    // Linux provides /dev/urandom, but retain a dependency-free fallback for
+    // platforms where it is unavailable. The process-local counter prevents
+    // repeated calls in one process from colliding.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let mut state = now.as_nanos() as u64
+        ^ (std::process::id() as u64).rotate_left(17)
+        ^ NEXT_ID.fetch_add(1, Ordering::Relaxed).rotate_left(31);
+    for byte in &mut bytes {
+        state ^= state << 7;
+        state ^= state >> 9;
+        state ^= state << 8;
+        *byte = state as u8;
+    }
+    format_id(&bytes)
+}
+
+fn format_id(bytes: &[u8; 16]) -> String {
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(result, "{byte:02x}");
+    }
+    result
+}
+
+/// Derive a stable identity for a legacy document. The canonical field stream
+/// deliberately excludes generated fields, so equivalent legacy documents get
+/// the same ID regardless of TOML whitespace or key ordering.
+fn legacy_id(document: &PresetDocument) -> String {
+    let mut bytes = Vec::new();
+    append_string(&mut bytes, &document.name);
+    bytes.extend_from_slice(&document.preamp_db.to_bits().to_le_bytes());
+    bytes.extend_from_slice(&(document.match_patterns.len() as u64).to_le_bytes());
+    for pattern in &document.match_patterns {
+        append_string(&mut bytes, pattern);
+    }
+    bytes.extend_from_slice(&(document.bands.len() as u64).to_le_bytes());
+    for band in &document.bands {
+        bytes.push(match band.kind {
+            BandType::Peaking => 0,
+            BandType::Lowshelf => 1,
+            BandType::Highshelf => 2,
+        });
+        bytes.extend_from_slice(&band.freq.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&band.gain.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&band.q.to_bits().to_le_bytes());
+        bytes.push(u8::from(band.enabled));
+    }
+    bytes.push(u8::from(document.favorite));
+    bytes.extend_from_slice(&(document.metadata.len() as u64).to_le_bytes());
+    for (key, value) in &document.metadata {
+        append_string(&mut bytes, key);
+        append_string(&mut bytes, value);
+    }
+
+    // FNV-1a is tiny, deterministic and available without another dependency.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("legacy-{hash:016x}")
+}
+
+fn append_string(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(value.as_bytes());
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -79,10 +256,18 @@ pub fn preset_path(name: &str) -> PathBuf {
 
 pub fn load_preset(name: &str) -> Result<Preset> {
     let path = preset_path(name);
+    load_preset_file(&path)
+}
+
+fn load_preset_file(path: &Path) -> Result<Preset> {
     let text =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    parse_preset(&text, path)
+}
+
+fn parse_preset(text: &str, path: &Path) -> Result<Preset> {
     let preset: Preset =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        toml::from_str(text).with_context(|| format!("parsing {}", path.display()))?;
     validate_match_patterns(&preset.match_patterns)
         .with_context(|| format!("`match` in {}", path.display()))?;
     Ok(preset)
@@ -230,6 +415,7 @@ pub fn parse_autoeq(text: &str) -> AutoEqImport {
             freq,
             gain,
             q,
+            enabled: true,
         });
     }
 
@@ -259,6 +445,92 @@ pub fn validate_match_patterns(patterns: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LEGACY_TOML: &str = r#"name = "Legacy"
+preamp_db = -6.0
+match = ["Example *"]
+
+[[band]]
+type = "peaking"
+freq = 1000.0
+gain = 3.0
+q = 0.7
+"#;
+
+    #[test]
+    fn legacy_toml_gets_defaults_and_stable_identity() {
+        let first: PresetDocument = toml::from_str(LEGACY_TOML).unwrap();
+        let second: PresetDocument = toml::from_str(LEGACY_TOML).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(first.id.starts_with("legacy-"));
+        assert!(first.bands[0].enabled);
+    }
+
+    #[test]
+    fn legacy_identity_changes_when_content_changes() {
+        let first: PresetDocument = toml::from_str(LEGACY_TOML).unwrap();
+        let changed = LEGACY_TOML.replace("gain = 3.0", "gain = 3.5");
+        let second: PresetDocument = toml::from_str(&changed).unwrap();
+
+        assert_ne!(first.id, second.id);
+    }
+
+    #[test]
+    fn legacy_load_does_not_rewrite_toml() {
+        let dir = std::env::temp_dir().join(format!("peq-preset-test-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy.toml");
+        std::fs::write(&path, LEGACY_TOML).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let loaded = load_preset_file(&path).unwrap();
+        let after = std::fs::read(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(loaded.name, "Legacy");
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn unsupported_schema_version_is_rejected() {
+        let text = format!(
+            "schema_version = {}\nname = \"future\"\n",
+            CURRENT_SCHEMA_VERSION + 1
+        );
+        let error = toml::from_str::<PresetDocument>(&text).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported preset schema version"));
+    }
+
+    #[test]
+    fn new_document_roundtrips_identity_and_metadata() {
+        let mut preset = PresetDocument::new("roundtrip");
+        preset.favorite = true;
+        preset.metadata.insert("source".into(), "test".into());
+        preset.bands.push(Band {
+            kind: BandType::Peaking,
+            freq: 1000.0,
+            gain: -2.0,
+            q: 1.0,
+            enabled: false,
+        });
+        let encoded = toml::to_string(&preset).unwrap();
+        let decoded: PresetDocument = toml::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, preset);
+    }
+
+    #[test]
+    fn new_documents_receive_distinct_identities() {
+        let first = PresetDocument::new("same name");
+        let second = PresetDocument::new("same name");
+
+        assert_ne!(first.id, second.id);
+        assert!(!first.id.is_empty());
+    }
 
     #[test]
     fn resolve_prefix() {

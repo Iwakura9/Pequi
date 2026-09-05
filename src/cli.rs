@@ -136,6 +136,7 @@ fn response_db(preset: &preset::Preset, freq: f64) -> f64 {
         + preset
             .bands
             .iter()
+            .filter(|b| b.enabled)
             .map(|b| dsp::band_response_db(b.kind, b.freq, b.gain, b.q, freq))
             .sum::<f64>()
 }
@@ -196,10 +197,9 @@ fn cmd_import(file: &PathBuf, name: Option<&str>) -> Result<()> {
             .unwrap_or_else(|| "imported".to_string())
     });
     let preset = preset::Preset {
-        name: derived.clone(),
         preamp_db: import.preamp_db,
-        match_patterns: Vec::new(),
         bands: import.bands,
+        ..preset::Preset::new(derived.clone())
     };
     preset::save_preset(&preset)?;
     println!("saved preset '{derived}' ({} bands)", preset.bands.len());
