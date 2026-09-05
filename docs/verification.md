@@ -43,3 +43,16 @@ A05: `scripts/check-test-pipewire.sh` passou no checkout integrado com o core
 sem objetos ALSA. A execução requer permissão para criar sockets locais, bloqueada
 pelo sandbox padrão deste ambiente. O teste do agente verificou também retorno
 de código 37 do comando filho e limpeza dos recursos próprios.
+
+## Persistência e sample rate
+
+B03: os testes cobrem criação, substituição por comparação de revisão, exatamente
+um vencedor entre escritores concorrentes, backup recuperável, falha de backup sem
+alterar o arquivo válido e listagem que mantém presets saudáveis apesar de arquivos
+inválidos. Temporários privados usam rename atômico e sync; backups ficam em
+`.backups/` para respeitar o limite de nomes do sistema de arquivos.
+
+C01: coeficientes e resposta recebem o sample rate explicitamente. Os testes cobrem
+44,1, 48, 96 e 192 kHz, ganho no centro, prateleiras, extremos válidos e estabilidade
+dos polos. Após essa integração, os 42 testes do núcleo sem áudio nativo passaram,
+assim como Clippy com warnings proibidos e formatação.

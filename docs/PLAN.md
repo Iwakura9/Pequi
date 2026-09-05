@@ -129,7 +129,7 @@ apresentado como sucesso.
 | --- | --- | --- | --- |
 | B01 | Introduzir documento versionado, identidade estável e `enabled` por banda; ler TOML antigo sem regravá-lo implicitamente. | A02 | concluída |
 | B02 | Centralizar validação de nomes, números e limites; rejeitar não finitos, caminhos indevidos e mais de 20 bandas. | B01 | concluída |
-| B03 | Implementar XDG, gravação atômica, backup e edição concorrente; falhas preservam o último arquivo válido. | B02 | pendente |
+| B03 | Implementar XDG, gravação atômica, backup e edição concorrente; falhas preservam o último arquivo válido. | B02 | concluída |
 | B04 | Implementar criação, duplicação, renomeação, remoção recuperável e favoritos; presets inválidos não impedem listar os demais. | B03 | pendente |
 | B05 | Fortalecer importação AutoEQ/SquigLink TXT, inclusive arquivos sem extensão; diagnósticos identificam linha e motivo. | B02 | pendente |
 | B06 | Importar o JSON legado do corpus, com mapeamento explícito dos tipos conhecidos; comparar semanticamente com o TXT correspondente. | B02 | pendente |
@@ -140,7 +140,7 @@ apresentado como sucesso.
 
 | ID | Entrega e critério de aceite | Depende de | Status |
 | --- | --- | --- | --- |
-| C01 | Tornar sample rate explícito no cálculo de coeficientes e resposta; validar 44,1/48/96/192 kHz. | B02 | pendente |
+| C01 | Tornar sample rate explícito no cálculo de coeficientes e resposta; validar 44,1/48/96/192 kHz. | B02 | concluída |
 | C02 | Processar blocos estéreo com estados independentes por canal; validar impulso, seno, silêncio e bypass. | C01 | pendente |
 | C03 | Encapsular `pw_filter` e comprovar passagem estéreo com links explícitos na sessão isolada; duas aplicações tocam simultaneamente. | A05 | pendente |
 | C04 | Conectar controle e processamento por fila limitada e bancos pré-alocados; atualizações entram por revisão sem bloquear o callback. | C02, C03 | pendente |
