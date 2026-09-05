@@ -9,7 +9,7 @@
 //! itself debounced so holding the key doesn't queue up repeated restarts.
 
 use crate::application;
-use crate::dsp::{band_response_db, BandType};
+use crate::dsp::{preset_response_db, BandType, FS};
 use crate::preset::Preset;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -231,7 +231,7 @@ fn draw(f: &mut ratatui::Frame, state: &State) {
     let curve_area = chunks[2];
     let width = curve_area.width.saturating_sub(2).max(10) as usize;
     let height = curve_area.height.saturating_sub(2).max(3) as usize;
-    let lines = crate::render::plot(|f| response_db(&state.preset, f), width, height);
+    let lines = crate::render::plot(|f| preset_response_db(&state.preset, f, FS), width, height);
     let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
     f.render_widget(
         Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("response")),
@@ -297,14 +297,4 @@ fn field_style(selected: bool) -> Style {
     } else {
         Style::default()
     }
-}
-
-fn response_db(preset: &Preset, freq: f64) -> f64 {
-    preset.preamp_db
-        + preset
-            .bands
-            .iter()
-            .filter(|b| b.enabled)
-            .map(|b| band_response_db(b.kind, b.freq, b.gain, b.q, freq))
-            .sum::<f64>()
 }

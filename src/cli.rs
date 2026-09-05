@@ -125,20 +125,10 @@ fn print_preset(preset: &preset::Preset) {
         .map(|(w, _)| w as usize)
         .unwrap_or(80)
         .clamp(20, 120);
-    let lines = render::plot(|f| response_db(preset, f), width, 12);
+    let lines = render::plot(|f| dsp::preset_response_db(preset, f, dsp::FS), width, 12);
     for line in lines {
         println!("{line}");
     }
-}
-
-fn response_db(preset: &preset::Preset, freq: f64) -> f64 {
-    preset.preamp_db
-        + preset
-            .bands
-            .iter()
-            .filter(|b| b.enabled)
-            .map(|b| dsp::band_response_db(b.kind, b.freq, b.gain, b.q, freq))
-            .sum::<f64>()
 }
 
 fn cmd_ls() -> Result<()> {
