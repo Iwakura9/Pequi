@@ -75,3 +75,16 @@ links explícitos das quatro saídas às duas entradas e do filtro ao sink nulo.
 observados 844 e 843 callbacks nas fontes e 1124 callbacks no filtro. A prova mede
 atividade e topologia; comparação numérica da resposta pertence a C04/C02 e aos
 ensaios finais. Testes, Clippy e formatação passaram com áudio nativo habilitado.
+
+C04: atualizações carregam banco precomputado, revisão e bypass por uma fila SPSC
+fixa de oito posições. Rajadas substituem o item pendente mais recente; revisões
+obsoletas são rejeitadas. O callback drena a fila, aplica somente a revisão mais
+nova e processa os buffers sem alocar, bloquear ou fazer I/O. A prova C03 voltou a
+passar após a integração, com 844/843 callbacks nas fontes e 1124 no filtro.
+
+D01: IPC JSON Lines versão 1 sobre socket Unix privado, com IDs, limite de 512 KiB,
+até 32 clientes e timeout de 500 ms. `SocketClient` implementa `EngineClient` e
+expõe aplicação, bypass, status, saída e polling/assinatura limitada de eventos.
+Os quatro testes de socket cobrem roundtrip, permissões, mensagens inválidas e
+grandes e um cliente incompleto em paralelo. No checkout integrado, 59 testes de
+biblioteca e quatro de IPC passaram; Clippy passou com áudio nativo habilitado.

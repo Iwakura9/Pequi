@@ -143,7 +143,7 @@ apresentado como sucesso.
 | C01 | Tornar sample rate explícito no cálculo de coeficientes e resposta; validar 44,1/48/96/192 kHz. | B02 | concluída |
 | C02 | Processar blocos estéreo com estados independentes por canal; validar impulso, seno, silêncio e bypass. | C01 | concluída |
 | C03 | Encapsular `pw_filter` e comprovar passagem estéreo com links explícitos na sessão isolada; duas aplicações tocam simultaneamente. | A05 | concluída |
-| C04 | Conectar controle e processamento por fila limitada e bancos pré-alocados; atualizações entram por revisão sem bloquear o callback. | C02, C03 | pendente |
+| C04 | Conectar controle e processamento por fila limitada e bancos pré-alocados; atualizações entram por revisão sem bloquear o callback. | C02, C03 | concluída |
 | C05 | Implementar transições de preset e bypass em 20 ms; rajadas convergem ao último estado sem recriar o sink. | C04 | pendente |
 | C06 | Medir pico, RMS e clipping de entrada/saída; publicar métricas sem logging ou alocações no processamento. | C04 | pendente |
 | C07 | Descobrir saídas e acompanhar adição/remoção por eventos; identificar dispositivos além de IDs temporários. | C03 | pendente |
@@ -157,7 +157,7 @@ recrie o sink a cada edição ou reinicie o PipeWire não atende à versão 1.0.
 
 | ID | Entrega e critério de aceite | Depende de | Status |
 | --- | --- | --- | --- |
-| D01 | Implementar servidor e cliente IPC versionados, assinaturas de eventos e timeouts; testar clientes lentos e mensagens inválidas. | A04, B01 | pendente |
+| D01 | Implementar servidor e cliente IPC versionados, assinaturas de eventos e timeouts; testar clientes lentos e mensagens inválidas. | A04, B01 | concluída |
 | D02 | Implementar `daemon run/start/stop/status`, instância única e encerramento controlado; fechar a TUI não encerra o áudio. | D01, C09 | pendente |
 | D03 | Unificar aplicação e bypass com confirmação do motor e persistência do snapshot; falhas não são sucesso. | D02, B03 | pendente |
 | D04 | Implementar sessões temporárias de prévia/A-B com expiração e revisão; desconexão não deixa edição temporária ativa. | D03 | pendente |
