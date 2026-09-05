@@ -13,6 +13,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{ffi::OsString, ops::Deref};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -113,6 +114,50 @@ pub struct RevisionConflict {
 pub struct PresetAlreadyExists {
     pub name: String,
     pub path: PathBuf,
+}
+
+/// A preset moved to the recoverable trash area by [`PresetStore::remove`].
+///
+/// The token and path are both exposed so a caller can persist either one and
+/// pass it to [`PresetStore::restore`].  The type dereferences to its path for
+/// callers that only need to inspect the trash entry as a filesystem path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemovedPreset {
+    pub name: String,
+    pub token: String,
+    pub path: PathBuf,
+    pub revision: Revision,
+}
+
+/// Compatibility aliases for callers that use a different noun for a trash
+/// entry.  New code should prefer [`RemovedPreset`].
+pub type DeletedPreset = RemovedPreset;
+pub type TrashEntry = RemovedPreset;
+
+impl RemovedPreset {
+    /// Return the unique token assigned to this deletion.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Return the path in the store's `.trash` directory.
+    pub fn as_path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for RemovedPreset {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Deref for RemovedPreset {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
 }
 
 /// Persistent TOML preset library rooted at one directory.
@@ -266,6 +311,181 @@ impl PresetStore {
         self.save(document, SaveMode::Replace(expected))
     }
 
+    /// Duplicate a valid preset under a new name.
+    ///
+    /// The source is read and the destination is checked while the store lock
+    /// is held.  The copied document receives a fresh stable identity; all
+    /// other document fields, including its favorite state, are retained.
+    pub fn duplicate(&self, source: &str, new_name: &str) -> Result<Revision> {
+        validation::validate_name(source)?;
+        validation::validate_name(new_name)?;
+        let source_path = self.path_for_name(source)?;
+        let target_path = self.path_for_name(new_name)?;
+        let _lock = self.acquire_lock()?;
+
+        let (_, _source_bytes, source_document, _) = self.load_locked(source, &source_path)?;
+        ensure_absent(&target_path, new_name)?;
+
+        let mut duplicate = source_document;
+        duplicate.name = new_name.to_string();
+        // Constructing a document is the public way to obtain a fresh identity;
+        // the source identity must never be reused by a duplicate.
+        duplicate.id = PresetDocument::new(new_name).id;
+        validation::validate_preset(&duplicate, None)?;
+        let encoded = serialize_document(&duplicate)?;
+        atomic_replace(&target_path, &encoded).with_context(|| {
+            format!(
+                "writing duplicate of {} to {}",
+                source_path.display(),
+                target_path.display()
+            )
+        })?;
+
+        Ok(revision(&encoded))
+    }
+
+    /// Rename a preset after a compare-and-swap check.
+    ///
+    /// The document identity is retained.  The exact source bytes are saved in
+    /// the source backup before the destination is written, so a failed target
+    /// write leaves both the source and a recoverable copy available.
+    pub fn rename(&self, source: &str, new_name: &str, expected: Revision) -> Result<Revision> {
+        validation::validate_name(source)?;
+        validation::validate_name(new_name)?;
+        let source_path = self.path_for_name(source)?;
+        let target_path = self.path_for_name(new_name)?;
+        let _lock = self.acquire_lock()?;
+
+        let (_, source_bytes, mut renamed, actual) = self.load_locked(source, &source_path)?;
+        ensure_expected(source, expected, actual)?;
+        ensure_absent(&target_path, new_name)?;
+
+        renamed.name = new_name.to_string();
+        validation::validate_preset(&renamed, None)?;
+        let encoded = serialize_document(&renamed)?;
+
+        // Backup first.  If this write or the target write fails, source_path
+        // has not been removed and remains the last valid library file.
+        let backup = self.backup_path(source)?;
+        atomic_write(&backup, &source_bytes).with_context(|| {
+            format!(
+                "backing up renamed preset {} to {}",
+                source_path.display(),
+                backup.display()
+            )
+        })?;
+        atomic_replace(&target_path, &encoded).with_context(|| {
+            format!(
+                "writing renamed preset {} to {}",
+                source_path.display(),
+                target_path.display()
+            )
+        })?;
+
+        // The destination is already durable before the source is removed. If
+        // removal itself fails, the original remains recoverable on disk.
+        fs::remove_file(&source_path)
+            .with_context(|| format!("removing renamed source {}", source_path.display()))?;
+        sync_directory(&self.root)?;
+        Ok(revision(&encoded))
+    }
+
+    /// Remove a preset into `.trash` after a compare-and-swap check.
+    ///
+    /// The returned token/path is required for restoration, making accidental
+    /// restoration of an unrelated deletion impossible.
+    pub fn remove(&self, name: &str, expected: Revision) -> Result<RemovedPreset> {
+        validation::validate_name(name)?;
+        let source_path = self.path_for_name(name)?;
+        let _lock = self.acquire_lock()?;
+
+        let (_, _source_bytes, document, actual) = self.load_locked(name, &source_path)?;
+        ensure_expected(name, expected, actual)?;
+        let (token, trash_path) = self.reserve_trash_path(name)?;
+
+        if let Err(error) = fs::rename(&source_path, &trash_path) {
+            let _ = fs::remove_file(&trash_path);
+            return Err(error).with_context(|| {
+                format!(
+                    "moving preset {} to recoverable trash {}",
+                    source_path.display(),
+                    trash_path.display()
+                )
+            });
+        }
+        // Both directory entries changed. Syncing them keeps the move
+        // recoverable across a sudden process or machine failure.
+        sync_directory(&self.root)?;
+        sync_directory(&self.trash_dir())?;
+
+        Ok(RemovedPreset {
+            name: document.name,
+            token,
+            path: trash_path,
+            revision: actual,
+        })
+    }
+
+    /// Restore a deletion identified by its returned path or token.
+    ///
+    /// The destination must be absent. Existing content is never overwritten;
+    /// if writing the destination fails, the trash entry remains untouched and
+    /// can be retried later.
+    pub fn restore<P: AsRef<Path>>(&self, deleted: P) -> Result<Revision> {
+        let trash_path = self.resolve_trash_path(deleted.as_ref())?;
+        let _lock = self.acquire_lock()?;
+
+        let bytes = fs::read(&trash_path)
+            .with_context(|| format!("reading deleted preset {}", trash_path.display()))?;
+        let document = parse_document(&bytes, &trash_path)?;
+        let target_path = self.path_for_name(&document.name)?;
+        ensure_absent(&target_path, &document.name)?;
+
+        // Preserve the exact bytes that were deleted, including legacy TOML
+        // formatting and its stable identity.
+        atomic_replace(&target_path, &bytes).with_context(|| {
+            format!(
+                "restoring deleted preset {} to {}",
+                trash_path.display(),
+                target_path.display()
+            )
+        })?;
+        fs::remove_file(&trash_path)
+            .with_context(|| format!("removing restored trash entry {}", trash_path.display()))?;
+        sync_directory(&self.trash_dir())?;
+        Ok(revision(&bytes))
+    }
+
+    /// Set a preset's favorite flag after a compare-and-swap check.
+    pub fn set_favorite(&self, name: &str, expected: Revision, favorite: bool) -> Result<Revision> {
+        validation::validate_name(name)?;
+        let path = self.path_for_name(name)?;
+        let _lock = self.acquire_lock()?;
+
+        let (_, bytes, mut document, actual) = self.load_locked(name, &path)?;
+        ensure_expected(name, expected, actual)?;
+        if document.favorite == favorite {
+            return Ok(actual);
+        }
+        document.favorite = favorite;
+        validation::validate_preset(&document, None)?;
+        let encoded = serialize_document(&document)?;
+        let backup = self.backup_path(name)?;
+        atomic_write(&backup, &bytes)
+            .with_context(|| format!("backing up favorite update for {name}"))?;
+        atomic_replace(&path, &encoded)
+            .with_context(|| format!("writing favorite update for {name}"))?;
+        Ok(revision(&encoded))
+    }
+
+    /// List valid presets and retain diagnostics for malformed files.
+    ///
+    /// This named alias makes the diagnostic-preserving API discoverable for
+    /// callers migrating from [`crate::preset::list_presets`].
+    pub fn list_with_diagnostics(&self) -> Result<PresetListing> {
+        self.list()
+    }
+
     /// Return the path used for a named preset after validating the name.
     pub fn path_for_name(&self, name: &str) -> Result<PathBuf> {
         validation::validate_name(name)?;
@@ -295,6 +515,82 @@ impl PresetStore {
             document,
             revision: revision(&bytes),
         })
+    }
+
+    fn load_locked(
+        &self,
+        name: &str,
+        path: &Path,
+    ) -> Result<(PathBuf, Vec<u8>, PresetDocument, Revision)> {
+        let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let document = parse_document(&bytes, path)?;
+        if document.name != name {
+            anyhow::bail!(
+                "preset file {} contains document named '{}', expected '{name}'",
+                path.display(),
+                document.name
+            );
+        }
+        let current_revision = revision(&bytes);
+        Ok((path.to_path_buf(), bytes, document, current_revision))
+    }
+
+    fn trash_dir(&self) -> PathBuf {
+        self.root.join(".trash")
+    }
+
+    fn reserve_trash_path(&self, name: &str) -> Result<(String, PathBuf)> {
+        let directory = self.trash_dir();
+        fs::create_dir_all(&directory)
+            .with_context(|| format!("creating recoverable trash {}", directory.display()))?;
+        for _ in 0..100 {
+            let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let token = format!("{name}-{stamp}-{id}");
+            let path = directory.join(format!("{token}.toml"));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            set_private_mode(&mut options);
+            match options.open(&path) {
+                Ok(_) => return Ok((token, path)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("creating {}", path.display()))
+                }
+            }
+        }
+        anyhow::bail!(
+            "could not allocate a unique deletion token in {}",
+            directory.display()
+        )
+    }
+
+    fn resolve_trash_path(&self, input: &Path) -> Result<PathBuf> {
+        let trash_directory = self.trash_dir();
+        let mut candidate = input.to_path_buf();
+        if input.components().count() == 1 {
+            let mut file_name = OsString::from(input.as_os_str());
+            if input.extension().is_none() {
+                file_name.push(".toml");
+            }
+            candidate = trash_directory.join(file_name);
+        }
+        if candidate.parent() != Some(trash_directory.as_path()) {
+            anyhow::bail!(
+                "deletion path must be a direct child of {}",
+                trash_directory.display()
+            );
+        }
+        if candidate
+            .extension()
+            .is_none_or(|extension| extension != "toml")
+        {
+            anyhow::bail!("deletion path must identify a TOML trash entry");
+        }
+        Ok(candidate)
     }
 }
 
@@ -348,6 +644,36 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
     atomic_write(path, bytes)
+}
+
+fn serialize_document(document: &PresetDocument) -> Result<Vec<u8>> {
+    Ok(toml::to_string_pretty(document)
+        .context("serializing preset")?
+        .into_bytes())
+}
+
+fn ensure_expected(name: &str, expected: Revision, actual: Revision) -> Result<()> {
+    if actual != expected {
+        return Err(RevisionConflict {
+            name: name.to_string(),
+            expected,
+            actual,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn ensure_absent(path: &Path, name: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(PresetAlreadyExists {
+            name: name.to_string(),
+            path: path.to_path_buf(),
+        }
+        .into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("checking {}", path.display())),
+    }
 }
 
 fn collect_entries(read_dir: ReadDir, listing: &mut PresetListing) {
@@ -636,6 +962,137 @@ mod tests {
         fs::create_dir(store.backup_path("test").unwrap()).unwrap();
         assert!(store.replace(&document("test", 2.0), revision).is_err());
         assert_eq!(fs::read(root.join("test.toml")).unwrap(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn duplicate_copies_content_with_a_new_identity_and_rejects_collision() {
+        let root = temp_root("duplicate");
+        let store = PresetStore::new(&root);
+        let mut source = document("source", 1.0);
+        source.favorite = true;
+        store.create(&source).unwrap();
+
+        let duplicate_revision = store.duplicate("source", "copy").unwrap();
+        let duplicate = store.load("copy").unwrap();
+        assert_eq!(duplicate.revision, duplicate_revision);
+        assert_eq!(duplicate.document.name, "copy");
+        assert_eq!(duplicate.document.bands, source.bands);
+        assert!(duplicate.document.favorite);
+        assert_ne!(duplicate.document.id, source.id);
+        assert_eq!(store.load("source").unwrap().document, source);
+
+        assert!(store.duplicate("source", "copy").is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rename_checks_revision_keeps_identity_and_backs_up_source() {
+        let root = temp_root("rename");
+        let store = PresetStore::new(&root);
+        let source = document("source", 1.0);
+        let first_revision = store.create(&source).unwrap();
+
+        let changed_revision = store.set_favorite("source", first_revision, true).unwrap();
+        assert!(store.rename("source", "renamed", first_revision).is_err());
+        assert!(store.load("source").is_ok());
+
+        let renamed_revision = store.rename("source", "renamed", changed_revision).unwrap();
+        let renamed = store.load("renamed").unwrap();
+        assert_eq!(renamed.revision, renamed_revision);
+        assert_eq!(renamed.document.id, source.id);
+        assert_eq!(renamed.document.name, "renamed");
+        assert!(renamed.document.favorite);
+        assert!(store.load("source").is_err());
+        assert_eq!(store.load_backup("source").unwrap().document.name, "source");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rename_failure_preserves_source_file() {
+        let root = temp_root("rename-failure");
+        let store = PresetStore::new(&root);
+        let source = document("source", 1.0);
+        let revision = store.create(&source).unwrap();
+        // A directory at the destination exercises the preflight collision
+        // path before any source removal or backup mutation.
+        fs::create_dir_all(root.join("destination.toml")).unwrap();
+
+        assert!(store.rename("source", "destination", revision).is_err());
+        assert_eq!(store.load("source").unwrap().document, source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_returns_unique_trash_entry_and_restore_is_collision_safe() {
+        let root = temp_root("remove-restore");
+        let store = PresetStore::new(&root);
+        let source = document("recover", 1.0);
+        let revision = store.create(&source).unwrap();
+
+        let stale = Revision([0; 32]);
+        assert!(store.remove("recover", stale).is_err());
+        assert!(store.load("recover").is_ok());
+
+        let deleted = store.remove("recover", revision).unwrap();
+        assert_eq!(deleted.name, "recover");
+        assert!(!deleted.token.is_empty());
+        assert!(deleted.path.starts_with(root.join(".trash")));
+        assert!(deleted.path.exists());
+        assert!(store.load("recover").is_err());
+
+        // An explicit restore refuses to replace a newly-created preset.
+        let replacement = document("recover", 9.0);
+        store.create(&replacement).unwrap();
+        assert!(store.restore(&deleted).is_err());
+        assert!(deleted.path.exists());
+        assert_eq!(store.load("recover").unwrap().document, replacement);
+
+        fs::remove_file(root.join("recover.toml")).unwrap();
+        let restored_revision = store.restore(&deleted.token).unwrap();
+        let restored = store.load("recover").unwrap();
+        assert_eq!(restored.revision, restored_revision);
+        assert_eq!(restored.document, source);
+        assert!(!deleted.path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn favorite_update_persists_and_rejects_stale_revision() {
+        let root = temp_root("favorite");
+        let store = PresetStore::new(&root);
+        let preset = document("favorite", 1.0);
+        let first_revision = store.create(&preset).unwrap();
+        let favorite_revision = store
+            .set_favorite("favorite", first_revision, true)
+            .unwrap();
+        let favorite = store.load("favorite").unwrap();
+        assert_eq!(favorite.revision, favorite_revision);
+        assert!(favorite.document.favorite);
+        assert!(store
+            .set_favorite("favorite", first_revision, false)
+            .is_err());
+
+        let plain_revision = store
+            .set_favorite("favorite", favorite_revision, false)
+            .unwrap();
+        assert!(!store.load("favorite").unwrap().document.favorite);
+        assert_ne!(plain_revision, favorite_revision);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn listing_ignores_backup_and_trash_subdirectories() {
+        let root = temp_root("listing-subdirs");
+        let store = PresetStore::new(&root);
+        store.create(&document("good", 1.0)).unwrap();
+        fs::create_dir_all(root.join(".backups")).unwrap();
+        fs::create_dir_all(root.join(".trash")).unwrap();
+        fs::write(root.join(".backups/bad.toml"), b"invalid").unwrap();
+        fs::write(root.join(".trash/bad.toml"), b"invalid").unwrap();
+        let listed = store.list().unwrap();
+        assert_eq!(listed.entries.len(), 1);
+        assert!(listed.diagnostics.is_empty());
         let _ = fs::remove_dir_all(root);
     }
 }

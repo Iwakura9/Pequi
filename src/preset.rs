@@ -247,6 +247,19 @@ pub fn list_presets() -> Result<Vec<String>> {
         .collect())
 }
 
+/// List valid presets together with diagnostics for malformed library files.
+///
+/// [`list_presets`] remains the compatibility wrapper used by the existing CLI;
+/// callers that need to explain invalid files should use this form.
+pub fn list_presets_with_diagnostics() -> Result<crate::storage::PresetListing> {
+    crate::storage::PresetStore::from_xdg().list()
+}
+
+/// Descriptive alias for [`list_presets_with_diagnostics`].
+pub fn list_presets_detailed() -> Result<crate::storage::PresetListing> {
+    list_presets_with_diagnostics()
+}
+
 pub fn preset_path(name: &str) -> Result<PathBuf> {
     validation::validate_name(name)?;
     Ok(preset_dir().join(format!("{name}.toml")))
