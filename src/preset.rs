@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const MAX_PEAKING_BANDS: usize = 18;
 /// Version of the TOML document format understood by this build.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
@@ -345,79 +344,204 @@ pub fn write_active(name: &str) -> Result<()> {
         .with_context(|| format!("writing {}", dir.join("active").display()))
 }
 
+/// Severity assigned to a line-level AutoEQ import diagnostic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutoEqDiagnosticSeverity {
+    Warning,
+    Error,
+}
+
+impl std::fmt::Display for AutoEqDiagnosticSeverity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Warning => formatter.write_str("warning"),
+            Self::Error => formatter.write_str("error"),
+        }
+    }
+}
+
+/// A problem found while parsing one line of an AutoEQ file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoEqDiagnostic {
+    pub line: usize,
+    pub severity: AutoEqDiagnosticSeverity,
+    pub reason: String,
+}
+
 /// Result of parsing an AutoEQ `ParametricEQ.txt` file.
+#[derive(Clone, Debug, PartialEq)]
 pub struct AutoEqImport {
     pub preamp_db: f64,
     pub bands: Vec<Band>,
+    pub diagnostics: Vec<AutoEqDiagnostic>,
+    /// Compatibility view retained for callers that only displayed warnings.
+    /// New callers should use [`Self::diagnostics`] so severity and line number
+    /// remain available.
     pub warnings: Vec<String>,
+    pub partial: bool,
 }
 
-/// Parse the AutoEQ/SquigLink `ParametricEQ.txt` format. `OFF` filters are dropped
-/// silently; unsupported filter types warn and are skipped; more than
-/// [`MAX_PEAKING_BANDS`] peaking filters warns and truncates.
-pub fn parse_autoeq(text: &str) -> AutoEqImport {
+impl AutoEqImport {
+    /// Whether the import contains a diagnostic that prevents saving it.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == AutoEqDiagnosticSeverity::Error)
+    }
+
+    /// Whether importing this result would discard an active filter.
+    pub fn is_partial(&self) -> bool {
+        self.partial
+    }
+}
+
+/// Parse the AutoEQ/SquigLink `ParametricEQ.txt` format.
+///
+/// Matching is case-insensitive and whitespace-tolerant. `OFF` filters are
+/// ignored before their parameters are inspected, which handles the zero
+/// placeholders emitted by AutoEQ. Unsupported active filter types are
+/// warnings and make the result partial. Malformed active filters are errors.
+/// Empty input and input without any `Preamp` or `Filter` line are hard errors.
+pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
+    if text.trim().is_empty() {
+        anyhow::bail!("AutoEQ input is empty");
+    }
+
     let mut preamp_db = 0.0;
     let mut bands = Vec::new();
-    let mut warnings = Vec::new();
-    let mut peaking_count = 0;
+    let mut diagnostics = Vec::new();
+    let mut partial = false;
+    let mut recognized_line = false;
+    let mut active_filters = 0usize;
 
-    for (lineno, line) in text.lines().enumerate() {
-        let line = line.trim();
-        let n = lineno + 1;
-        if let Some(rest) = line.strip_prefix("Preamp:") {
-            if let Some(tok) = rest.split_whitespace().next() {
-                match tok.parse() {
-                    Ok(v) => preamp_db = v,
-                    Err(_) => warnings.push(format!("line {n}: couldn't parse preamp value")),
-                }
+    for (lineno, original_line) in text.lines().enumerate() {
+        let line_number = lineno + 1;
+        let line = original_line.trim().trim_start_matches('\u{feff}').trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let tokens = normalized_tokens(line);
+        let Some(first) = tokens.first() else {
+            continue;
+        };
+
+        if first.eq_ignore_ascii_case("preamp") {
+            recognized_line = true;
+            match parse_preamp(&tokens) {
+                Ok(value) => preamp_db = value,
+                Err(reason) => add_diagnostic(
+                    &mut diagnostics,
+                    line_number,
+                    AutoEqDiagnosticSeverity::Error,
+                    reason,
+                ),
             }
             continue;
         }
-        if !line.starts_with("Filter") {
+
+        if !first.eq_ignore_ascii_case("filter") {
             continue;
         }
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() < 4 {
+        recognized_line = true;
+
+        let state_index = tokens.iter().position(|token| {
+            token.eq_ignore_ascii_case("on") || token.eq_ignore_ascii_case("off")
+        });
+        let Some(state_index) = state_index else {
+            add_diagnostic(
+                &mut diagnostics,
+                line_number,
+                AutoEqDiagnosticSeverity::Error,
+                "missing ON/OFF filter state".to_string(),
+            );
+            continue;
+        };
+
+        if tokens[state_index].eq_ignore_ascii_case("off") {
+            // AutoEQ emits `Fc 0 Hz Gain 0 dB Q 0` for disabled filters. Do
+            // not inspect those values or report validation diagnostics.
             continue;
         }
-        if tokens[2] == "OFF" {
+
+        active_filters += 1;
+        if active_filters > validation::MAX_BANDS {
+            if tokens
+                .get(state_index + 1)
+                .is_some_and(|token| match_filter_type(token).is_none())
+            {
+                partial = true;
+            }
+            add_diagnostic(
+                &mut diagnostics,
+                line_number,
+                AutoEqDiagnosticSeverity::Error,
+                format!(
+                    "more than {} active filters; maximum is {}",
+                    validation::MAX_BANDS,
+                    validation::MAX_BANDS
+                ),
+            );
             continue;
         }
-        if tokens[2] != "ON" {
-            warnings.push(format!(
-                "line {n}: unrecognized filter state '{}', skipped",
-                tokens[2]
-            ));
+
+        let Some(type_token) = tokens.get(state_index + 1) else {
+            add_diagnostic(
+                &mut diagnostics,
+                line_number,
+                AutoEqDiagnosticSeverity::Error,
+                "missing active filter type".to_string(),
+            );
             continue;
-        }
-        let kind = match tokens[3] {
-            "PK" => BandType::Peaking,
-            "LSC" | "LS" => BandType::Lowshelf,
-            "HSC" | "HS" => BandType::Highshelf,
-            other => {
-                warnings.push(format!(
-                    "line {n}: unsupported filter type '{other}', skipped"
-                ));
+        };
+        let kind = match_filter_type(type_token);
+        let Some(kind) = kind else {
+            partial = true;
+            add_diagnostic(
+                &mut diagnostics,
+                line_number,
+                AutoEqDiagnosticSeverity::Warning,
+                format!("unsupported active filter type '{type_token}'"),
+            );
+            continue;
+        };
+
+        let freq = match parse_field(&tokens, "fc", "Fc") {
+            Ok(value) => value,
+            Err(reason) => {
+                add_diagnostic(
+                    &mut diagnostics,
+                    line_number,
+                    AutoEqDiagnosticSeverity::Error,
+                    reason,
+                );
                 continue;
             }
         };
-        let freq = find_after(&tokens, "Fc");
-        let gain = find_after(&tokens, "Gain");
-        let q = find_after(&tokens, "Q");
-        let (Some(freq), Some(gain), Some(q)) = (freq, gain, q) else {
-            warnings.push(format!("line {n}: missing Fc/Gain/Q, skipped"));
-            continue;
-        };
-
-        if kind == BandType::Peaking {
-            if peaking_count >= MAX_PEAKING_BANDS {
-                warnings.push(format!(
-                    "more than {MAX_PEAKING_BANDS} peaking filters, truncating at line {n}"
-                ));
-                break;
+        let gain = match parse_field(&tokens, "gain", "Gain") {
+            Ok(value) => value,
+            Err(reason) => {
+                add_diagnostic(
+                    &mut diagnostics,
+                    line_number,
+                    AutoEqDiagnosticSeverity::Error,
+                    reason,
+                );
+                continue;
             }
-            peaking_count += 1;
-        }
+        };
+        let q = match parse_field(&tokens, "q", "Q") {
+            Ok(value) => value,
+            Err(reason) => {
+                add_diagnostic(
+                    &mut diagnostics,
+                    line_number,
+                    AutoEqDiagnosticSeverity::Error,
+                    reason,
+                );
+                continue;
+            }
+        };
 
         bands.push(Band {
             kind,
@@ -428,16 +552,83 @@ pub fn parse_autoeq(text: &str) -> AutoEqImport {
         });
     }
 
-    AutoEqImport {
+    if !recognized_line {
+        anyhow::bail!("unrecognized AutoEQ input: no Preamp or Filter lines found");
+    }
+
+    let warnings = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == AutoEqDiagnosticSeverity::Warning)
+        .map(|diagnostic| format!("line {}: {}", diagnostic.line, diagnostic.reason))
+        .collect();
+    Ok(AutoEqImport {
         preamp_db,
         bands,
+        diagnostics,
         warnings,
+        partial,
+    })
+}
+
+fn normalized_tokens(line: &str) -> Vec<&str> {
+    // `Filter 1: ...` is the usual spelling, while SquigLink exports can use
+    // spaces around the colon. Treat the separator uniformly.
+    line.split(':').flat_map(str::split_whitespace).collect()
+}
+
+fn parse_preamp(tokens: &[&str]) -> std::result::Result<f64, String> {
+    let value = tokens
+        .get(1)
+        .ok_or_else(|| "missing preamp value".to_string())?;
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| format!("invalid preamp value '{value}'"))?;
+    if !parsed.is_finite() {
+        return Err(format!("preamp value '{value}' is not finite"));
+    }
+    Ok(parsed)
+}
+
+fn match_filter_type(token: &str) -> Option<BandType> {
+    if token.eq_ignore_ascii_case("pk") {
+        Some(BandType::Peaking)
+    } else if token.eq_ignore_ascii_case("ls") || token.eq_ignore_ascii_case("lsc") {
+        Some(BandType::Lowshelf)
+    } else if token.eq_ignore_ascii_case("hs") || token.eq_ignore_ascii_case("hsc") {
+        Some(BandType::Highshelf)
+    } else {
+        None
     }
 }
 
-fn find_after(tokens: &[&str], key: &str) -> Option<f64> {
-    let idx = tokens.iter().position(|t| *t == key)?;
-    tokens.get(idx + 1)?.parse().ok()
+fn add_diagnostic(
+    diagnostics: &mut Vec<AutoEqDiagnostic>,
+    line: usize,
+    severity: AutoEqDiagnosticSeverity,
+    reason: String,
+) {
+    diagnostics.push(AutoEqDiagnostic {
+        line,
+        severity,
+        reason,
+    });
+}
+
+fn parse_field(tokens: &[&str], key: &str, label: &str) -> std::result::Result<f64, String> {
+    let idx = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case(key))
+        .ok_or_else(|| format!("missing {label} value"))?;
+    let value = tokens
+        .get(idx + 1)
+        .ok_or_else(|| format!("missing {label} value"))?;
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| format!("invalid {label} value '{value}'"))?;
+    if !parsed.is_finite() {
+        return Err(format!("{label} value '{value}' is not finite"));
+    }
+    Ok(parsed)
 }
 
 /// Validate `match` glob patterns eagerly (used by `peq watch` in the future). A pattern
@@ -571,33 +762,76 @@ q = 0.7
                      Filter 1: ON PK Fc 21 Hz Gain 6.7 dB Q 1.100\n\
                      Filter 2: OFF PK Fc 85 Hz Gain 6.9 dB Q 3.000\n\
                      Filter 3: ON LSC Fc 105 Hz Gain 4.0 dB Q 0.70\n";
-        let r = parse_autoeq(text);
+        let r = parse_autoeq(text).unwrap();
         assert_eq!(r.preamp_db, -6.8);
         assert_eq!(r.bands.len(), 2);
         assert_eq!(r.bands[0].kind, BandType::Peaking);
         assert_eq!(r.bands[1].kind, BandType::Lowshelf);
-        assert!(r.warnings.is_empty());
+        assert!(r.diagnostics.is_empty());
     }
 
     #[test]
     fn autoeq_warns_on_unsupported_type() {
         let text = "Filter 1: ON XY Fc 21 Hz Gain 6.7 dB Q 1.100\n";
-        let r = parse_autoeq(text);
+        let r = parse_autoeq(text).unwrap();
         assert!(r.bands.is_empty());
-        assert_eq!(r.warnings.len(), 1);
+        assert!(r.partial);
+        assert_eq!(r.diagnostics.len(), 1);
+        assert_eq!(r.diagnostics[0].line, 1);
+        assert_eq!(r.diagnostics[0].severity, AutoEqDiagnosticSeverity::Warning);
     }
 
     #[test]
-    fn autoeq_truncates_after_18_peaking() {
+    fn autoeq_rejects_more_than_twenty_active_filters() {
         let mut text = String::new();
-        for i in 1..=25 {
+        for i in 1..=21 {
             text.push_str(&format!(
                 "Filter {i}: ON PK Fc {f} Hz Gain 1.0 dB Q 1.0\n",
                 f = 100 + i
             ));
         }
-        let r = parse_autoeq(&text);
-        assert_eq!(r.bands.len(), MAX_PEAKING_BANDS);
-        assert!(r.warnings.iter().any(|w| w.contains("truncating")));
+        let r = parse_autoeq(&text).unwrap();
+        assert_eq!(r.bands.len(), validation::MAX_BANDS);
+        assert!(r.has_errors());
+        assert!(r.diagnostics.iter().any(|diagnostic| {
+            diagnostic.line == 21 && diagnostic.reason.contains("more than 20 active filters")
+        }));
+    }
+
+    #[test]
+    fn autoeq_accepts_case_whitespace_and_crlf() {
+        let text = "  PREAMP : -3.5 dB\r\n\
+                     fIlTeR 1 : oN pK fC 100 Hz gAiN 2 dB q 1\r\n\
+                     FILTER 2: ON hSc Fc 10000 Hz Gain -1 dB Q 0.7\r\n";
+        let r = parse_autoeq(text).unwrap();
+        assert_eq!(r.preamp_db, -3.5);
+        assert_eq!(r.bands.len(), 2);
+        assert_eq!(r.bands[0].kind, BandType::Peaking);
+        assert_eq!(r.bands[1].kind, BandType::Highshelf);
+        assert!(r.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn autoeq_ignores_malformed_off_placeholders() {
+        let text =
+            "Preamp: -6 dB\nFilter 1: OFF PK Fc 0 Hz Gain 0 dB Q 0\nFilter 2: OFF nonsense\n";
+        let r = parse_autoeq(text).unwrap();
+        assert!(r.bands.is_empty());
+        assert!(r.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn autoeq_reports_malformed_active_filter_with_line_and_reason() {
+        let text = "Preamp: -6 dB\nFilter 1: ON PK Fc nope Hz Gain 1 dB Q 1\n";
+        let r = parse_autoeq(text).unwrap();
+        assert!(r.has_errors());
+        assert_eq!(r.diagnostics[0].line, 2);
+        assert!(r.diagnostics[0].reason.contains("Fc"));
+    }
+
+    #[test]
+    fn autoeq_rejects_empty_and_unrecognized_input() {
+        assert!(parse_autoeq("  \r\n\t").is_err());
+        assert!(parse_autoeq("GraphicEQ: 20 0; 100 1").is_err());
     }
 }

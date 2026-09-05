@@ -37,6 +37,9 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         name: Option<String>,
+        /// Allow import when unsupported active filters make the result partial.
+        #[arg(long)]
+        allow_partial: bool,
     },
     /// Generate the filter-chain config
     Init {
@@ -66,7 +69,11 @@ pub fn run() -> Result<()> {
         Some(Command::Next) => cmd_next(),
         Some(Command::Show { name }) => cmd_show(&name),
         Some(Command::Edit { name }) => cmd_edit(&name),
-        Some(Command::Import { file, name }) => cmd_import(&file, name.as_deref()),
+        Some(Command::Import {
+            file,
+            name,
+            allow_partial,
+        }) => cmd_import(&file, name.as_deref(), allow_partial),
         Some(Command::Init { force }) => cmd_init(force),
         Some(Command::Status { json }) => cmd_status(json),
         Some(Command::Completions { shell }) => cmd_completions(shell),
@@ -174,12 +181,21 @@ fn cmd_edit(query: &str) -> Result<()> {
     tui::run(preset)
 }
 
-fn cmd_import(file: &PathBuf, name: Option<&str>) -> Result<()> {
+fn cmd_import(file: &PathBuf, name: Option<&str>, allow_partial: bool) -> Result<()> {
     let text =
         std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    let import = preset::parse_autoeq(&text);
-    for w in &import.warnings {
-        eprintln!("warning: {w}");
+    let import = preset::parse_autoeq(&text)?;
+    for diagnostic in &import.diagnostics {
+        eprintln!(
+            "{}: line {}: {}",
+            diagnostic.severity, diagnostic.line, diagnostic.reason
+        );
+    }
+    if import.has_errors() {
+        bail!("refusing AutoEQ import with error diagnostics");
+    }
+    if import.is_partial() && !allow_partial {
+        bail!("refusing partial AutoEQ import; pass --allow-partial to continue");
     }
     let derived = name.map(str::to_string).unwrap_or_else(|| {
         file.file_stem()
@@ -191,6 +207,7 @@ fn cmd_import(file: &PathBuf, name: Option<&str>) -> Result<()> {
         bands: import.bands,
         ..preset::Preset::new(derived.clone())
     };
+    crate::validation::validate_preset(&preset, None).context("validating imported preset")?;
     preset::save_preset(&preset)?;
     println!("saved preset '{derived}' ({} bands)", preset.bands.len());
     Ok(())
