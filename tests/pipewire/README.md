@@ -13,3 +13,11 @@ config/state/data/cache homes, plus a unique `PIPEWIRE_REMOTE`. Readiness is
 bounded by ten seconds and requires a completed `pw-dump` handshake. On exit
 the wrapper terminates only the daemon PID it started and removes its
 temporary tree. It never calls systemd or changes the ordinary user session.
+
+Run `scripts/check-native-c03.sh` for the C03 proof. It builds the
+`native_pw_proof` example, starts one `peq` `pw_filter` sink and two independent
+native playback clients, then creates the six source-to-filter and
+filter-to-sink links explicitly with `pw-link`. The null sink monitor remains
+disabled in this hardware-free session, so the check verifies downstream graph
+delivery through nonzero realtime process counters for both sources and the
+filter.

@@ -16,4 +16,7 @@ pub mod storage;
 pub mod tui;
 pub mod validation;
 
+#[cfg(feature = "native-audio")]
+pub mod native_audio;
+
 pub use validation::{validate_name, validate_preset};
