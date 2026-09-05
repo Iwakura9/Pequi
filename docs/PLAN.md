@@ -120,15 +120,15 @@ apresentado como sucesso.
 | A01 | Registrar este plano, as decisões arquiteturais e a evolução histórica; distinguir requisitos atuais das instruções arquivadas. | — | concluída |
 | A02 | Separar biblioteca, aplicação e adaptadores; CLI/TUI deixam de concentrar regras de negócio. | A01 | concluída |
 | A03 | Criar CI de compilação, formatação, Clippy e testes; permitir testar o núcleo sem dependências nativas de áudio. | A02 | concluída |
-| A04 | Implementar motor simulado com sucesso, atraso, desconexão e falha; clientes podem ser desenvolvidos sem PipeWire. | A02 | pendente |
-| A05 | Criar sessão PipeWire de teste com socket e diretórios próprios, sem dispositivos físicos; execução não altera a sessão normal. | A03 | pendente |
+| A04 | Implementar motor simulado com sucesso, atraso, desconexão e falha; clientes podem ser desenvolvidos sem PipeWire. | A02 | concluída |
+| A05 | Criar sessão PipeWire de teste com socket e diretórios próprios, sem dispositivos físicos; execução não altera a sessão normal. | A03 | concluída |
 
 ### B — Presets, validação e persistência
 
 | ID | Entrega e critério de aceite | Depende de | Status |
 | --- | --- | --- | --- |
 | B01 | Introduzir documento versionado, identidade estável e `enabled` por banda; ler TOML antigo sem regravá-lo implicitamente. | A02 | concluída |
-| B02 | Centralizar validação de nomes, números e limites; rejeitar não finitos, caminhos indevidos e mais de 20 bandas. | B01 | pendente |
+| B02 | Centralizar validação de nomes, números e limites; rejeitar não finitos, caminhos indevidos e mais de 20 bandas. | B01 | concluída |
 | B03 | Implementar XDG, gravação atômica, backup e edição concorrente; falhas preservam o último arquivo válido. | B02 | pendente |
 | B04 | Implementar criação, duplicação, renomeação, remoção recuperável e favoritos; presets inválidos não impedem listar os demais. | B03 | pendente |
 | B05 | Fortalecer importação AutoEQ/SquigLink TXT, inclusive arquivos sem extensão; diagnósticos identificam linha e motivo. | B02 | pendente |

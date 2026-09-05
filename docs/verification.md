@@ -31,3 +31,15 @@ no importador. O JSON legado corresponde aos tipos 0=LS, 1=HS e 3=PK do TXT asso
 
 Ainda não foram medidos latência P95, estabilidade durante 30 minutos ou reprodução
 de duas aplicações. Esses resultados dependem do novo motor e da sessão isolada.
+
+## Validação, simulação e sessão isolada
+
+A04 e B02 integrados: 35 testes passaram sem áudio nativo. O motor simulado cobre
+sucesso, atraso, timeout sem mutação, desconexão, falha e conflitos de revisão.
+A validação comum é usada também pelo motor simulado, inclusive Nyquist.
+
+A05: `scripts/check-test-pipewire.sh` passou no checkout integrado com o core
+`peq-a05-164554-164554`, somente um driver dummy e um sink nulo estéreo FL/FR,
+sem objetos ALSA. A execução requer permissão para criar sockets locais, bloqueada
+pelo sandbox padrão deste ambiente. O teste do agente verificou também retorno
+de código 37 do comando filho e limpeza dos recursos próprios.
