@@ -10,6 +10,8 @@ use anyhow::{bail, Context, Result};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+const SINK_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Connects briefly and reports whether a node named [`SINK_NODE_NAME`] is registered.
 /// Returns `Ok(false)` (not an error) if PipeWire just isn't running the sink; returns
 /// `Err` only if we couldn't connect to PipeWire at all.
@@ -41,20 +43,25 @@ pub fn sink_exists() -> Result<bool> {
 
     let done = Rc::new(Cell::new(false));
     let done_cb = done.clone();
-    let loop_cb = mainloop.clone();
     let pending = core.sync(0).context("sync")?;
     let _listener_core = core
         .add_listener_local()
         .done(move |id, seq| {
             if id == pw::core::PW_ID_CORE && seq == pending {
                 done_cb.set(true);
-                loop_cb.quit();
             }
         })
         .register();
 
+    let deadline = Instant::now() + SINK_QUERY_TIMEOUT;
     while !done.get() {
-        mainloop.run();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        mainloop
+            .loop_()
+            .iterate(pw::loop_::Timeout::Finite(remaining));
     }
     Ok(found.get())
 }

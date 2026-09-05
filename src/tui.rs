@@ -8,9 +8,9 @@
 //! (no PipeWire round-trip), and pushing it to the real sink is an explicit action (`a`),
 //! itself debounced so holding the key doesn't queue up repeated restarts.
 
+use crate::application;
 use crate::dsp::{band_response_db, BandType};
 use crate::preset::Preset;
-use crate::{chain, pw};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{
@@ -173,8 +173,7 @@ fn event_loop(
                     .is_none_or(|t| t.elapsed() >= APPLY_DEBOUNCE);
                 if ready {
                     state.last_apply = Some(Instant::now());
-                    chain::write_config(&state.preset)?;
-                    match pw::reload() {
+                    match application::apply_preset(&state.preset) {
                         Ok(()) => state.status = "applied to sink".into(),
                         Err(e) => state.status = format!("apply failed: {e}"),
                     }
