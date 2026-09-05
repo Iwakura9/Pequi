@@ -130,7 +130,7 @@ apresentado como sucesso.
 | B01 | Introduzir documento versionado, identidade estável e `enabled` por banda; ler TOML antigo sem regravá-lo implicitamente. | A02 | concluída |
 | B02 | Centralizar validação de nomes, números e limites; rejeitar não finitos, caminhos indevidos e mais de 20 bandas. | B01 | concluída |
 | B03 | Implementar XDG, gravação atômica, backup e edição concorrente; falhas preservam o último arquivo válido. | B02 | concluída |
-| B04 | Implementar criação, duplicação, renomeação, remoção recuperável e favoritos; presets inválidos não impedem listar os demais. | B03 | pendente |
+| B04 | Implementar criação, duplicação, renomeação, remoção recuperável e favoritos; presets inválidos não impedem listar os demais. | B03 | concluída |
 | B05 | Fortalecer importação AutoEQ/SquigLink TXT, inclusive arquivos sem extensão; diagnósticos identificam linha e motivo. | B02 | pendente |
 | B06 | Importar o JSON legado do corpus, com mapeamento explícito dos tipos conhecidos; comparar semanticamente com o TXT correspondente. | B02 | pendente |
 | B07 | Implementar prévia e importação em lote, com relatório de colisões e perdas; nunca sobrescrever ou truncar silenciosamente. | B03, B05, B06 | pendente |
@@ -142,7 +142,7 @@ apresentado como sucesso.
 | --- | --- | --- | --- |
 | C01 | Tornar sample rate explícito no cálculo de coeficientes e resposta; validar 44,1/48/96/192 kHz. | B02 | concluída |
 | C02 | Processar blocos estéreo com estados independentes por canal; validar impulso, seno, silêncio e bypass. | C01 | concluída |
-| C03 | Encapsular `pw_filter` e comprovar passagem estéreo com links explícitos na sessão isolada; duas aplicações tocam simultaneamente. | A05 | pendente |
+| C03 | Encapsular `pw_filter` e comprovar passagem estéreo com links explícitos na sessão isolada; duas aplicações tocam simultaneamente. | A05 | concluída |
 | C04 | Conectar controle e processamento por fila limitada e bancos pré-alocados; atualizações entram por revisão sem bloquear o callback. | C02, C03 | pendente |
 | C05 | Implementar transições de preset e bypass em 20 ms; rajadas convergem ao último estado sem recriar o sink. | C04 | pendente |
 | C06 | Medir pico, RMS e clipping de entrada/saída; publicar métricas sem logging ou alocações no processamento. | C04 | pendente |

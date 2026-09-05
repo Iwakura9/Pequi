@@ -63,3 +63,15 @@ por canal e sem alocação, lock ou I/O. Os testes cobrem impulso, ganho de seno
 Fc, silêncio, independência dos canais e bypass bit a bit. Mudanças de bypass zeram
 o estado nesta etapa; a transição de 20 ms será implementada em C05. Após integrar
 C02, 48 testes do núcleo passaram e Clippy permaneceu sem warnings.
+
+B04: a biblioteca suporta duplicação com nova identidade, rename com CAS mantendo
+a identidade, remoção em `.trash`, restauração sem sobrescrita e favoritos por CAS.
+Os testes cobrem colisões, revisão obsoleta, falha de rename e listagem sem artefatos
+de backup/lixeira. O núcleo passou em 54 testes após a integração.
+
+C03: `NativePwFilter` encapsula `pw_filter` e mantém portas DSP FL/FR. A prova
+`scripts/check-native-c03.sh` passou na sessão isolada com duas fontes simultâneas,
+links explícitos das quatro saídas às duas entradas e do filtro ao sink nulo. Foram
+observados 844 e 843 callbacks nas fontes e 1124 callbacks no filtro. A prova mede
+atividade e topologia; comparação numérica da resposta pertence a C04/C02 e aos
+ensaios finais. Testes, Clippy e formatação passaram com áudio nativo habilitado.
