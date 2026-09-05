@@ -335,6 +335,9 @@ impl EngineClient for MockEngine {
         self.ready(timeout)?;
         self.check_revision(expected_revision)?;
 
+        crate::validation::validate_preset(&preset, Some(self.config.sample_rate as f64))
+            .map_err(|error| EngineError::Failure(error.to_string()))?;
+
         let snapshot = AppliedSnapshot {
             preset,
             revision: self.next_revision(),
