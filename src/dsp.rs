@@ -146,12 +146,29 @@ pub struct StereoProcessor {
 impl StereoProcessor {
     /// Construct a processor and validate the preset for `sample_rate`.
     pub fn new(preset: &Preset, sample_rate: f64) -> anyhow::Result<Self> {
-        Ok(Self {
-            bank: FilterBank::new(preset, sample_rate)?,
+        Ok(Self::from_bank(FilterBank::new(preset, sample_rate)?))
+    }
+
+    /// Construct a processor from a bank that was already validated and
+    /// precomputed on the control path.
+    pub fn from_bank(bank: FilterBank) -> Self {
+        Self {
+            bank,
             left_state: [BiquadState::default(); MAX_FILTERS],
             right_state: [BiquadState::default(); MAX_FILTERS],
             bypassed: false,
-        })
+        }
+    }
+
+    /// Replace the bank and clear both channel histories.
+    ///
+    /// The assignment only copies fixed-size arrays. It is intended for the
+    /// realtime owner after it has received a control update; validation and
+    /// coefficient calculation happen before the update enters the callback
+    /// queue.
+    pub fn replace_bank(&mut self, bank: FilterBank) {
+        self.bank = bank;
+        self.reset();
     }
 
     /// Return the stream rate captured when the bank was built.

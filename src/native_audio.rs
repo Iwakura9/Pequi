@@ -4,9 +4,12 @@
 //! a safe wrapper for the filter convenience API.  The FFI below mirrors the
 //! public declarations in `/usr/include/pipewire-0.3/pipewire/filter.h`.
 //! Keeping this boundary here makes the rest of the audio engine independent of
-//! C layout details.  The filter is deliberately a passthrough in C03; C04 can
-//! replace the process body with a preallocated stereo DSP bank.
+//! C layout details. The filter keeps its graph stable while control updates
+//! move through a bounded lock-free queue into a preallocated stereo processor.
 
+use crate::dsp::{FilterBank, StereoProcessor};
+use crate::preset::Preset;
+use crate::rt_queue::{PushResult, SpscQueue};
 use anyhow::{bail, Context, Result};
 use pipewire as pw;
 use std::ffi::{c_char, c_void, CString};
@@ -14,11 +17,209 @@ use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CHANNELS: usize = 2;
 const FILTER_FLAGS_RT_PROCESS: u32 = 1 << 2;
 const FILTER_PORT_FLAG_MAP_BUFFERS: u32 = 1;
+const DEFAULT_SAMPLE_RATE_HZ: f64 = 48_000.0;
+
+/// Number of pending control updates retained by the native audio owner.
+pub const ENGINE_UPDATE_QUEUE_CAPACITY: usize = 8;
+
+/// A validated, precomputed control update sent to the realtime owner.
+#[derive(Debug, Clone, Copy)]
+pub struct EngineUpdate {
+    pub bank: FilterBank,
+    pub revision: u64,
+    pub bypassed: bool,
+}
+
+impl EngineUpdate {
+    pub const fn new(bank: FilterBank, revision: u64, bypassed: bool) -> Self {
+        Self {
+            bank,
+            revision,
+            bypassed,
+        }
+    }
+}
+
+/// The fixed-capacity queue used for engine updates.
+pub type EngineUpdateQueue = SpscQueue<EngineUpdate, ENGINE_UPDATE_QUEUE_CAPACITY>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubmitReceipt {
+    pub revision: u64,
+    pub coalesced: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitError {
+    StaleRevision { revision: u64, latest: u64 },
+    QueueFull { revision: u64 },
+}
+
+/// A control-side producer for the native callback's bounded queue.
+///
+/// The queue is SPSC, so this handle is deliberately not cloneable. It can be
+/// moved between control components while retaining one logical producer.
+pub struct NativeEngineHandle {
+    queue: Arc<EngineUpdateQueue>,
+    accepted_revision: Arc<AtomicU64>,
+}
+
+impl NativeEngineHandle {
+    pub fn new() -> Self {
+        Self::with_revision(0)
+    }
+
+    fn with_queue(queue: Arc<EngineUpdateQueue>, revision: u64) -> Self {
+        Self {
+            queue,
+            accepted_revision: Arc::new(AtomicU64::new(revision)),
+        }
+    }
+
+    fn with_revision(revision: u64) -> Self {
+        Self::with_queue(Arc::new(EngineUpdateQueue::new()), revision)
+    }
+
+    /// Submit an already-prepared bank without waiting for the callback.
+    pub fn submit(&self, update: EngineUpdate) -> std::result::Result<SubmitReceipt, SubmitError> {
+        let latest = self.accepted_revision.load(Ordering::Acquire);
+        if update.revision <= latest {
+            return Err(SubmitError::StaleRevision {
+                revision: update.revision,
+                latest,
+            });
+        }
+
+        let result = self.queue.push(update);
+        match result {
+            PushResult::Queued | PushResult::Coalesced => {
+                self.accepted_revision
+                    .store(update.revision, Ordering::Release);
+                Ok(SubmitReceipt {
+                    revision: update.revision,
+                    coalesced: result == PushResult::Coalesced,
+                })
+            }
+            PushResult::Full => Err(SubmitError::QueueFull {
+                revision: update.revision,
+            }),
+        }
+    }
+
+    pub fn submit_update(
+        &self,
+        update: EngineUpdate,
+    ) -> std::result::Result<SubmitReceipt, SubmitError> {
+        self.submit(update)
+    }
+
+    /// Build coefficients on the control path and submit one update.
+    pub fn apply_preset(
+        &self,
+        preset: &Preset,
+        sample_rate: f64,
+        revision: u64,
+        bypassed: bool,
+    ) -> Result<SubmitReceipt> {
+        let bank = FilterBank::new(preset, sample_rate)?;
+        self.submit(EngineUpdate::new(bank, revision, bypassed))
+            .map_err(|error| anyhow::anyhow!("could not submit engine update: {error:?}"))
+    }
+
+    pub fn accepted_revision(&self) -> u64 {
+        self.accepted_revision.load(Ordering::Acquire)
+    }
+
+    /// Obtain a queue reference for constructing a realtime test owner. The
+    /// callback itself never clones this `Arc`.
+    pub fn queue(&self) -> Arc<EngineUpdateQueue> {
+        self.queue.clone()
+    }
+}
+
+impl Default for NativeEngineHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Realtime-owned processor state and its pending update queue.
+pub struct ProcessorState {
+    processor: StereoProcessor,
+    queue: Arc<EngineUpdateQueue>,
+    active_revision: u64,
+}
+
+impl ProcessorState {
+    pub fn new(
+        bank: FilterBank,
+        queue: Arc<EngineUpdateQueue>,
+        active_revision: u64,
+        bypassed: bool,
+    ) -> Self {
+        let mut processor = StereoProcessor::from_bank(bank);
+        processor.set_bypassed(bypassed);
+        Self {
+            processor,
+            queue,
+            active_revision,
+        }
+    }
+
+    #[inline]
+    pub fn process_buffers(&mut self, left: &mut [f32], right: &mut [f32]) {
+        process_buffers(
+            &mut self.processor,
+            &self.queue,
+            &mut self.active_revision,
+            left,
+            right,
+        );
+    }
+
+    pub fn active_revision(&self) -> u64 {
+        self.active_revision
+    }
+
+    pub fn processor(&self) -> &StereoProcessor {
+        &self.processor
+    }
+}
+
+/// Apply queued updates and process one planar block without allocation,
+/// locking, validation, logging, or I/O.
+#[inline]
+pub fn process_buffers(
+    processor: &mut StereoProcessor,
+    queue: &EngineUpdateQueue,
+    active_revision: &mut u64,
+    left: &mut [f32],
+    right: &mut [f32],
+) {
+    let mut newest = None;
+    while let Some(update) = queue.pop() {
+        if update.revision > *active_revision
+            && newest
+                .map(|candidate: EngineUpdate| update.revision > candidate.revision)
+                .unwrap_or(true)
+        {
+            newest = Some(update);
+        }
+    }
+
+    if let Some(update) = newest {
+        processor.replace_bank(update.bank);
+        processor.set_bypassed(update.bypassed);
+        *active_revision = update.revision;
+    }
+    processor.process_planar(left, right);
+}
 
 type PwFilter = pw::sys::pw_filter;
 type PwBuffer = pw::sys::pw_buffer;
@@ -82,19 +283,20 @@ unsafe extern "C" {
 const DIRECTION_INPUT: i32 = 0;
 const DIRECTION_OUTPUT: i32 = 1;
 
-#[derive(Debug)]
 struct FilterState {
     inputs: [*mut c_void; CHANNELS],
     outputs: [*mut c_void; CHANNELS],
+    processor: ProcessorState,
     effective_rate_hz: AtomicU32,
     process_calls: AtomicU64,
 }
 
 impl FilterState {
-    fn new() -> Self {
+    fn new(bank: FilterBank, queue: Arc<EngineUpdateQueue>) -> Self {
         Self {
             inputs: [ptr::null_mut(); CHANNELS],
             outputs: [ptr::null_mut(); CHANNELS],
+            processor: ProcessorState::new(bank, queue, 0, false),
             effective_rate_hz: AtomicU32::new(0),
             process_calls: AtomicU64::new(0),
         }
@@ -112,7 +314,7 @@ unsafe extern "C" fn process_callback(data: *mut c_void, position: *mut SpaIoPos
     // SAFETY: PipeWire calls this with the exact pointer supplied to
     // pw_filter_new_simple.  The owner keeps the Box<FilterState> alive until
     // pw_filter_destroy has returned, so this callback cannot outlive state.
-    let Some(state) = (data as *mut FilterState).as_ref() else {
+    let Some(state) = (data as *mut FilterState).as_mut() else {
         return;
     };
     if position.is_null() {
@@ -135,29 +337,71 @@ unsafe extern "C" fn process_callback(data: *mut c_void, position: *mut SpaIoPos
             .store(rate.denom / rate.num, Ordering::Relaxed);
     }
 
+    let mut outputs = [ptr::null_mut(); CHANNELS];
+    let mut inputs = [ptr::null_mut(); CHANNELS];
     for channel in 0..CHANNELS {
         // SAFETY: Port pointers are returned by pw_filter_add_port and remain
         // valid for the life of the filter. These functions are RT-safe by the
         // PipeWire filter API contract; they only access preallocated buffers.
-        let output = unsafe { pw_filter_get_dsp_buffer(state.outputs[channel], n_samples) };
-        if output.is_null() {
-            continue;
+        outputs[channel] =
+            unsafe { pw_filter_get_dsp_buffer(state.outputs[channel], n_samples).cast::<f32>() };
+        inputs[channel] =
+            unsafe { pw_filter_get_dsp_buffer(state.inputs[channel], n_samples).cast::<f32>() };
+    }
+
+    // Keep the update drain and processor state in one extracted function so
+    // the same callback contract is testable without a PipeWire graph.
+    if outputs[0].is_null() && outputs[1].is_null() {
+        state.processor.process_buffers(&mut [], &mut []);
+    } else if !outputs[0].is_null() && !outputs[1].is_null() {
+        for channel in 0..CHANNELS {
+            // SAFETY: each mapped DSP port contains n_samples f32 values.
+            if inputs[channel].is_null() {
+                unsafe {
+                    ptr::write_bytes(
+                        outputs[channel].cast::<u8>(),
+                        0,
+                        n_samples as usize * std::mem::size_of::<f32>(),
+                    )
+                };
+            } else {
+                unsafe {
+                    ptr::copy(
+                        inputs[channel].cast::<u8>(),
+                        outputs[channel].cast::<u8>(),
+                        n_samples as usize * std::mem::size_of::<f32>(),
+                    )
+                };
+            }
         }
-        let input = unsafe { pw_filter_get_dsp_buffer(state.inputs[channel], n_samples) };
-        if input.is_null() {
-            // A disconnected input is silence. Clearing the output also avoids
-            // replaying stale data if links are changed while the sink lives.
-            unsafe { ptr::write_bytes(output.cast::<u8>(), 0, n_samples as usize * 4) };
-        } else {
-            // SAFETY: DSP ports are declared as 32-bit float mono audio; the C
-            // API returns at least n_samples * sizeof(float) bytes.
-            unsafe {
-                ptr::copy(
-                    input.cast::<u8>(),
-                    output.cast::<u8>(),
-                    n_samples as usize * std::mem::size_of::<f32>(),
-                )
+        // SAFETY: output pointers are distinct stereo port buffers and each
+        // has the declared n_samples f32 elements.
+        let left = unsafe { std::slice::from_raw_parts_mut(outputs[0], n_samples as usize) };
+        let right = unsafe { std::slice::from_raw_parts_mut(outputs[1], n_samples as usize) };
+        state.processor.process_buffers(left, right);
+    } else {
+        // A partially disconnected graph still drains updates and processes
+        // the connected channel. The missing channel is represented as zero;
+        // its output is discarded when no output port exists.
+        state.processor.process_buffers(&mut [], &mut []);
+        for index in 0..n_samples as usize {
+            let left = if inputs[0].is_null() {
+                0.0
+            } else {
+                unsafe { inputs[0].add(index).read() }
             };
+            let right = if inputs[1].is_null() {
+                0.0
+            } else {
+                unsafe { inputs[1].add(index).read() }
+            };
+            let (left, right) = state.processor.processor.process_frame_f32(left, right);
+            if !outputs[0].is_null() {
+                unsafe { outputs[0].add(index).write(left) };
+            }
+            if !outputs[1].is_null() {
+                unsafe { outputs[1].add(index).write(right) };
+            }
         }
     }
     state.process_calls.fetch_add(1, Ordering::Relaxed);
@@ -194,6 +438,7 @@ pub struct NativePwFilter {
     main_loop: pw::main_loop::MainLoopRc,
     filter: NonNull<PwFilter>,
     state: Box<FilterState>,
+    engine: NativeEngineHandle,
     node_id: u32,
     // Rc is !Send and documents that the loop owner must remain single-threaded.
     _not_send: PhantomData<Rc<()>>,
@@ -202,10 +447,23 @@ pub struct NativePwFilter {
 impl NativePwFilter {
     /// Create the stable `peq` Audio/Sink node with input/output FL and FR ports.
     pub fn new() -> Result<Self> {
+        let preset = Preset::new("native-neutral");
+        Self::new_with_preset(&preset, DEFAULT_SAMPLE_RATE_HZ)
+    }
+
+    /// Create the filter with a bank prepared for the target stream rate.
+    pub fn new_with_preset(preset: &Preset, sample_rate: f64) -> Result<Self> {
+        let bank = FilterBank::new(preset, sample_rate)?;
+        Self::new_with_bank(bank)
+    }
+
+    fn new_with_bank(bank: FilterBank) -> Result<Self> {
         pw::init();
         let main_loop =
             pw::main_loop::MainLoopRc::new(None).context("creating native PipeWire main loop")?;
-        let mut state = Box::new(FilterState::new());
+        let queue = Arc::new(EngineUpdateQueue::new());
+        let engine = NativeEngineHandle::with_queue(queue.clone(), 0);
+        let mut state = Box::new(FilterState::new(bank, queue));
         let state_ptr = (&mut *state) as *mut FilterState as *mut c_void;
         let name = CString::new("peq").context("building native filter name")?;
         let mut filter_props = pw::properties::PropertiesBox::new();
@@ -299,6 +557,7 @@ impl NativePwFilter {
             main_loop,
             filter,
             state,
+            engine,
             node_id,
             _not_send: PhantomData,
         })
@@ -306,6 +565,22 @@ impl NativePwFilter {
 
     pub fn node_id(&self) -> u32 {
         self.node_id
+    }
+
+    /// Access the control producer for this stable filter node.
+    pub fn engine_handle(&self) -> &NativeEngineHandle {
+        &self.engine
+    }
+
+    /// Move the producer to a control owner when it must outlive a borrow of
+    /// this PipeWire owner. The callback keeps its own queue reference.
+    pub fn take_engine_handle(&mut self) -> NativeEngineHandle {
+        std::mem::take(&mut self.engine)
+    }
+
+    /// Revision last applied by the realtime callback.
+    pub fn applied_revision(&self) -> u64 {
+        self.state.processor.active_revision()
     }
 
     /// Effective graph sample rate published by the realtime callback.
@@ -558,3 +833,65 @@ impl Drop for NativePwSource {
 // prevent accidental drift if PipeWire changes its opaque declarations.
 #[allow(dead_code)]
 fn _ffi_layout_markers(_: *mut PwCore, _: *mut SpaHook, _: *const SpaDict, _: *const SpaEvent) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preset::Preset;
+
+    fn neutral_bank() -> FilterBank {
+        FilterBank::new(&Preset::new("native-test"), DEFAULT_SAMPLE_RATE_HZ)
+            .expect("test preset is valid")
+    }
+
+    fn gain_bank(gain_db: f64) -> FilterBank {
+        let mut preset = Preset::new("native-test");
+        preset.preamp_db = gain_db;
+        FilterBank::new(&preset, DEFAULT_SAMPLE_RATE_HZ).expect("test preset is valid")
+    }
+
+    #[test]
+    fn callback_owner_applies_newest_revision_and_rejects_stale_control() {
+        let handle = NativeEngineHandle::new();
+        let queue = handle.queue();
+        let mut state = ProcessorState::new(neutral_bank(), queue, 0, false);
+
+        handle
+            .submit(EngineUpdate::new(gain_bank(3.0), 2, false))
+            .expect("revision 2 should be accepted");
+        let stale = handle.submit(EngineUpdate::new(gain_bank(1.0), 1, false));
+        assert_eq!(
+            stale,
+            Err(SubmitError::StaleRevision {
+                revision: 1,
+                latest: 2
+            })
+        );
+
+        let mut left = [1.0_f32; 8];
+        let mut right = [1.0_f32; 8];
+        state.process_buffers(&mut left, &mut right);
+        assert_eq!(state.active_revision(), 2);
+        assert!(left
+            .iter()
+            .all(|sample| (*sample - 10f32.powf(3.0 / 20.0)).abs() < 1e-6));
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn bypass_update_reaches_callback_without_rebuilding_owner() {
+        let handle = NativeEngineHandle::new();
+        let queue = handle.queue();
+        let mut state = ProcessorState::new(gain_bank(6.0), queue, 0, false);
+        handle
+            .submit(EngineUpdate::new(gain_bank(6.0), 1, true))
+            .expect("bypass update should be accepted");
+
+        let mut left = [0.25_f32; 4];
+        let mut right = [-0.5_f32; 4];
+        state.process_buffers(&mut left, &mut right);
+        assert_eq!(state.active_revision(), 1);
+        assert_eq!(left, [0.25; 4]);
+        assert_eq!(right, [-0.5; 4]);
+    }
+}

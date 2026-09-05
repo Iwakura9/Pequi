@@ -12,6 +12,7 @@ pub mod engine;
 pub mod preset;
 pub mod pw;
 pub mod render;
+pub mod rt_queue;
 pub mod storage;
 pub mod tui;
 pub mod validation;
