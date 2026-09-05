@@ -9,6 +9,7 @@ pub mod chain;
 pub mod cli;
 pub mod dsp;
 pub mod engine;
+pub mod ipc;
 pub mod preset;
 pub mod pw;
 pub mod render;
