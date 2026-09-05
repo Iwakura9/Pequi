@@ -56,3 +56,10 @@ C01: coeficientes e resposta recebem o sample rate explicitamente. Os testes cob
 44,1, 48, 96 e 192 kHz, ganho no centro, prateleiras, extremos válidos e estabilidade
 dos polos. Após essa integração, os 42 testes do núcleo sem áudio nativo passaram,
 assim como Clippy com warnings proibidos e formatação.
+
+C02: `FilterBank` precomputa até 20 filtros habilitados fora do caminho de áudio;
+`StereoProcessor` processa blocos planares ou intercalados com estados separados
+por canal e sem alocação, lock ou I/O. Os testes cobrem impulso, ganho de seno em
+Fc, silêncio, independência dos canais e bypass bit a bit. Mudanças de bypass zeram
+o estado nesta etapa; a transição de 20 ms será implementada em C05. Após integrar
+C02, 48 testes do núcleo passaram e Clippy permaneceu sem warnings.
