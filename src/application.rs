@@ -54,6 +54,7 @@ impl StatusSnapshot {
 /// failed applications therefore cannot be reported as successful or alter the
 /// remembered preset. A successful apply always leaves bypass cleared.
 pub fn apply_preset(preset: &preset::Preset) -> Result<()> {
+    crate::validation::validate_preset(preset, None)?;
     chain::write_config(preset)?;
     pw::reload()?;
     preset::write_active(&preset.name)?;

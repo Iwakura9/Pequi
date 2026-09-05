@@ -12,3 +12,6 @@ pub mod preset;
 pub mod pw;
 pub mod render;
 pub mod tui;
+pub mod validation;
+
+pub use validation::{validate_name, validate_preset};

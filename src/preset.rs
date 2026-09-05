@@ -1,6 +1,7 @@
 //! Preset model, TOML load/save, fuzzy name resolution, AutoEQ import.
 
 use crate::dsp::BandType;
+use crate::validation;
 use anyhow::{Context, Result};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
@@ -241,21 +242,24 @@ pub fn list_presets() -> Result<Vec<String>> {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
         .filter_map(|e| {
-            e.path()
+            let name = e
+                .path()
                 .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
+                .map(|s| s.to_string_lossy().into_owned())?;
+            validation::validate_name(&name).ok().map(|()| name)
         })
         .collect();
     names.sort();
     Ok(names)
 }
 
-pub fn preset_path(name: &str) -> PathBuf {
-    preset_dir().join(format!("{name}.toml"))
+pub fn preset_path(name: &str) -> Result<PathBuf> {
+    validation::validate_name(name)?;
+    Ok(preset_dir().join(format!("{name}.toml")))
 }
 
 pub fn load_preset(name: &str) -> Result<Preset> {
-    let path = preset_path(name);
+    let path = preset_path(name)?;
     load_preset_file(&path)
 }
 
@@ -268,16 +272,16 @@ fn load_preset_file(path: &Path) -> Result<Preset> {
 fn parse_preset(text: &str, path: &Path) -> Result<Preset> {
     let preset: Preset =
         toml::from_str(text).with_context(|| format!("parsing {}", path.display()))?;
-    validate_match_patterns(&preset.match_patterns)
-        .with_context(|| format!("`match` in {}", path.display()))?;
+    validation::validate_preset(&preset, None)
+        .with_context(|| format!("validating {}", path.display()))?;
     Ok(preset)
 }
 
 pub fn save_preset(preset: &Preset) -> Result<()> {
-    validate_match_patterns(&preset.match_patterns)?;
+    validation::validate_preset(preset, None)?;
     let dir = preset_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = preset_path(&preset.name);
+    let path = preset_path(&preset.name)?;
     let text = toml::to_string_pretty(preset).context("serializing preset")?;
     std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
 }
@@ -325,11 +329,11 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
 pub fn read_active() -> Option<String> {
     std::fs::read_to_string(state_dir().join("active"))
         .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| validation::validate_name(s).is_ok())
 }
 
 pub fn write_active(name: &str) -> Result<()> {
+    validation::validate_name(name)?;
     let dir = state_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     std::fs::write(dir.join("active"), name)

@@ -156,6 +156,7 @@ pub fn config_file_path() -> PathBuf {
 
 /// Write the config for `preset`, creating the conf.d directory if needed.
 pub fn write_config(preset: &Preset) -> Result<PathBuf> {
+    crate::validation::validate_preset(preset, None)?;
     let path = config_file_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
