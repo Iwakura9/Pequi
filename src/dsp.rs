@@ -184,8 +184,8 @@ impl StereoProcessor {
         self.bypassed
     }
 
-    /// Clear both channels' delay state.  This is an explicit control-path
-    /// operation; normal bypass leaves state untouched as documented above.
+    /// Clear both channels' delay state. This is a control-path operation also
+    /// used when bypass changes, so stale wet history cannot reappear later.
     pub fn reset(&mut self) {
         self.left_state = [BiquadState::default(); MAX_FILTERS];
         self.right_state = [BiquadState::default(); MAX_FILTERS];
