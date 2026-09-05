@@ -3,6 +3,10 @@ name = "peq"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["native-audio"]
+native-audio = ["dep:pipewire"]
+
 [[bin]]
 name = "peq"
 path = "src/main.rs"
@@ -16,6 +20,6 @@ anyhow = "1"
 thiserror = "1"
 ratatui = "0.29"
 crossterm = "0.28"
-pipewire = "0.10"
+pipewire = { version = "0.10", optional = true }
 
 [dev-dependencies]
