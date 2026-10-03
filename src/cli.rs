@@ -1,4 +1,4 @@
-//! `pequi [DIR]`: open the TUI on a directory of AutoEQ files.
+//! `pequi [DIR]`: open the TUI on a directory of EQ curve files.
 
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -7,10 +7,10 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "pequi",
-    about = "Pick and edit EasyEffects EQ curves from AutoEQ files"
+    about = "Pick and edit parametric EQ curves played through EasyEffects"
 )]
 struct Cli {
-    /// Directory of AutoEQ ParametricEQ.txt files [default: $XDG_CONFIG_HOME/pequi/profiles]
+    /// Directory of EQ curve .txt files [default: $XDG_CONFIG_HOME/pequi/profiles]
     dir: Option<PathBuf>,
 }
 

@@ -1,9 +1,18 @@
 # Pequi
 
-A terminal picker and editor for [AutoEQ](https://github.com/jaakkopasanen/AutoEq)
-curves, played through [EasyEffects](https://github.com/wwmm/easyeffects).
+A terminal picker and editor for parametric EQ curves, played through
+[EasyEffects](https://github.com/wwmm/easyeffects).
 
-Browse a folder of `ParametricEQ.txt` files as a tree, see the frequency response as a
+Curves are plain text files, one band per line:
+
+```
+Preamp: -3.0 dB
+Filter 1: ON LSC Fc 60 Hz Gain 2.0 dB Q 0.700
+Filter 2: ON PK Fc 200 Hz Gain 1.0 dB Q 1.400
+Filter 3: ON HSC Fc 15000 Hz Gain 3.0 dB Q 0.700
+```
+
+Browse a folder of them as a tree, see the frequency response as a
 braille plot, and tweak bands while listening. Pequi does no audio processing itself:
 EasyEffects and its LSP equalizer handle that. Pequi just writes an EasyEffects output
 preset named `pequi` and asks the running EasyEffects to load it.
@@ -29,8 +38,8 @@ cargo install --path .
 pequi [DIR]
 ```
 
-`DIR` defaults to `~/.config/pequi/profiles`. Pointing it at your AutoEQ folder with a
-symlink works well.
+`DIR` defaults to `~/.config/pequi/profiles`. Symlinking it to the folder where you keep
+your curves works well.
 
 To try it without your own curves:
 
@@ -39,7 +48,7 @@ pequi examples/profiles
 ```
 
 The bundled examples (V-Shape, U-Shape, Bass Boost, Treble Control, Relaxed) are
-generic tonal tilts, not tuned to any headphone.
+generic tonal tilts, not tuned to any particular headphone.
 
 > Loading the `pequi` preset replaces EasyEffects' whole output chain with that single
 > equalizer.
