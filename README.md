@@ -1,28 +1,71 @@
 # peq
 
-Terminal picker/editor for EasyEffects EQ curves. Browse a folder of AutoEQ
-`ParametricEQ.txt` files as a tree, see the response as a braille curve, and tweak the
-bands. EasyEffects (with its LSP equalizer) does all the audio. peq writes an
-EasyEffects output preset named `peq` and runs `easyeffects -l peq`.
+A terminal picker and editor for [AutoEQ](https://github.com/jaakkopasanen/AutoEq)
+curves, played through [EasyEffects](https://github.com/wwmm/easyeffects).
 
-Edits are temporary: they are previewed live through EasyEffects, but the `.txt` file only
-changes when you save with `s`. If you discard (`u`, or `d` when leaving), peq reloads the saved curve.
+Browse a folder of `ParametricEQ.txt` files as a tree, see the frequency response as a
+braille plot, and tweak bands while listening. peq does no audio processing itself:
+EasyEffects and its LSP equalizer handle that. peq just writes an EasyEffects output
+preset named `peq` and asks the running EasyEffects to load it.
 
+Edits are previewed live, but the `.txt` file only changes when you save. Discard and
+you're back to the saved curve.
+
+## Requirements
+
+- Linux with PipeWire
+- EasyEffects (with the LSP plugins it uses for its equalizer), running
+- A stable Rust toolchain
+
+## Install
+
+```sh
+cargo install --path .
 ```
-cargo build --release
-peq [DIR]        # default DIR: ~/.config/peq/profiles (symlink it to your AutoEQ folder)
+
+## Usage
+
+```sh
+peq [DIR]
 ```
 
-Loading the `peq` preset replaces EasyEffects' entire output chain with that single equalizer.
+`DIR` defaults to `~/.config/peq/profiles`. Pointing it at your AutoEQ folder with a
+symlink works well.
+
+> Loading the `peq` preset replaces EasyEffects' whole output chain with that single
+> equalizer.
 
 ## Keys
 
-`b` toggles the EasyEffects global bypass on both screens (shown as `BYPASS` in the status bar).
+| Where | Key | Action |
+|---|---|---|
+| anywhere | `b` | toggle EasyEffects global bypass |
+| tree | `j` / `k` | move |
+| tree | `l` / `Enter` | expand folder or open curve |
+| tree | `h` | collapse |
+| tree | `Tab` | go to the EQ screen |
+| tree | `q` | quit |
+| EQ | `j` / `k` | select band |
+| EQ | `h` / `l` | select field |
+| EQ | `+` / `-` | fine adjust |
+| EQ | `[` / `]` | coarse adjust |
+| EQ | `t` | change band type |
+| EQ | `space` | enable / disable band |
+| EQ | `n` / `x` | add / delete band |
+| EQ | `s` / `u` | save / discard |
+| EQ | `Esc` / `Tab` | back to the tree |
+| EQ | `?` | help |
 
-Tree: `j/k` move, `l`/`Enter` expand or open, `h` collapse, `Tab` go to the EQ screen, `q` quit.
+Leaving a curve with unsaved edits asks whether to save (`s`) or discard (`d`).
 
-EQ: `j/k` select a row, `h/l` select a field, `+/-` fine adjust, `[`/`]` coarse adjust, `t` change type,
-`space` turn the band on or off, `n` add a band, `x` delete it, `s` save, `u` discard, `Esc`/`Tab` back to the tree, `?` help.
+## Development
 
-The old standalone audio engine (daemon, IPC, native PipeWire filter) is archived and not
-compiled in `.old/`.
+```sh
+cargo test --all-targets
+cargo test -- --ignored   # loads a curve into the running EasyEffects (changes live audio)
+cargo clippy --all-targets -- -D warnings
+```
+
+## License
+
+[MIT](LICENSE)

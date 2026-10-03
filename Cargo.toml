@@ -2,10 +2,12 @@
 name = "peq"
 version = "0.1.0"
 edition = "2021"
-
-[[bin]]
-name = "peq"
-path = "src/main.rs"
+description = "Terminal picker and editor for AutoEQ curves, played through EasyEffects"
+license = "MIT"
+repository = "https://github.com/Iwakura9/peq"
+readme = "README.md"
+keywords = ["equalizer", "autoeq", "easyeffects", "tui", "audio"]
+categories = ["command-line-utilities", "multimedia::audio"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -16,5 +18,3 @@ anyhow = "1"
 thiserror = "1"
 ratatui = "0.29"
 crossterm = "0.28"
-
-[dev-dependencies]
