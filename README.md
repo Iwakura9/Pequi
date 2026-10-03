@@ -32,6 +32,15 @@ pequi [DIR]
 `DIR` defaults to `~/.config/pequi/profiles`. Pointing it at your AutoEQ folder with a
 symlink works well.
 
+To try it without your own curves:
+
+```sh
+pequi examples/profiles
+```
+
+The bundled examples (V-Shape, U-Shape, Bass Boost, Treble Control, Relaxed) are
+generic tonal tilts, not tuned to any headphone.
+
 > Loading the `pequi` preset replaces EasyEffects' whole output chain with that single
 > equalizer.
 
