@@ -133,7 +133,7 @@ mod tests {
     #[test]
     #[ignore]
     fn loads_into_running_easyeffects() {
-        let parsed = crate::preset::parse_autoeq(
+        let parsed = crate::preset::parse_peq(
             "Preamp: -3.0 dB\n\
              Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.700\n\
              Filter 2: ON PK Fc 1000 Hz Gain -2.0 dB Q 1.400\n\

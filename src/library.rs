@@ -1,4 +1,4 @@
-//! IDE-style file tree over a directory of AutoEQ files.
+//! IDE-style file tree over a directory of PEQ files.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ pub struct Node {
     pub path: PathBuf,
     pub depth: usize,
     pub is_dir: bool,
-    /// For files: whether it parses as a usable AutoEQ preset.
+    /// For files: whether it parses as a usable PEQ preset.
     pub ok: bool,
 }
 
@@ -55,7 +55,7 @@ impl Tree {
         // directories first, then files, each alphabetical
         entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         for (is_dir, path) in entries {
-            let ok = is_dir || crate::preset::load_autoeq_file(&path).is_ok();
+            let ok = is_dir || crate::preset::load_peq_file(&path).is_ok();
             self.visible.push(Node {
                 path: path.clone(),
                 depth,

@@ -1,4 +1,4 @@
-//! Preset model, TOML load/save, fuzzy name resolution, AutoEQ import.
+//! Preset model, TOML load/save, fuzzy name resolution, PEQ import.
 
 use crate::dsp::BandType;
 use crate::validation;
@@ -271,14 +271,14 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
     needle.chars().all(|c| chars.any(|h| h == c))
 }
 
-/// Severity assigned to a line-level AutoEQ import diagnostic.
+/// Severity assigned to a line-level PEQ import diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AutoEqDiagnosticSeverity {
+pub enum PeqDiagnosticSeverity {
     Warning,
     Error,
 }
 
-impl std::fmt::Display for AutoEqDiagnosticSeverity {
+impl std::fmt::Display for PeqDiagnosticSeverity {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Warning => formatter.write_str("warning"),
@@ -287,20 +287,20 @@ impl std::fmt::Display for AutoEqDiagnosticSeverity {
     }
 }
 
-/// A problem found while parsing one line of an AutoEQ file.
+/// A problem found while parsing one line of a PEQ file.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AutoEqDiagnostic {
+pub struct PeqDiagnostic {
     pub line: usize,
-    pub severity: AutoEqDiagnosticSeverity,
+    pub severity: PeqDiagnosticSeverity,
     pub reason: String,
 }
 
-/// Result of parsing an AutoEQ `ParametricEQ.txt` file.
+/// Result of parsing a PEQ text file.
 #[derive(Clone, Debug, PartialEq)]
-pub struct AutoEqImport {
+pub struct PeqImport {
     pub preamp_db: f64,
     pub bands: Vec<Band>,
-    pub diagnostics: Vec<AutoEqDiagnostic>,
+    pub diagnostics: Vec<PeqDiagnostic>,
     /// Compatibility view retained for callers that only displayed warnings.
     /// New callers should use [`Self::diagnostics`] so severity and line number
     /// remain available.
@@ -308,12 +308,12 @@ pub struct AutoEqImport {
     pub partial: bool,
 }
 
-impl AutoEqImport {
+impl PeqImport {
     /// Whether the import contains a diagnostic that prevents saving it.
     pub fn has_errors(&self) -> bool {
         self.diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.severity == AutoEqDiagnosticSeverity::Error)
+            .any(|diagnostic| diagnostic.severity == PeqDiagnosticSeverity::Error)
     }
 
     /// Whether importing this result would discard an active filter.
@@ -322,16 +322,16 @@ impl AutoEqImport {
     }
 }
 
-/// Parse the AutoEQ/SquigLink `ParametricEQ.txt` format.
+/// Parse the text PEQ format: a `Preamp:` line plus `Filter N: ON PK Fc … Gain … Q …` lines.
 ///
 /// Matching is case-insensitive and whitespace-tolerant. `OFF` filters are
 /// ignored before their parameters are inspected, which handles the zero
-/// placeholders emitted by AutoEQ. Unsupported active filter types are
+/// placeholders some EQ tools emit. Unsupported active filter types are
 /// warnings and make the result partial. Malformed active filters are errors.
 /// Empty input and input without any `Preamp` or `Filter` line are hard errors.
-pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
+pub fn parse_peq(text: &str) -> Result<PeqImport> {
     if text.trim().is_empty() {
-        anyhow::bail!("AutoEQ input is empty");
+        anyhow::bail!("PEQ input is empty");
     }
 
     let mut preamp_db = 0.0;
@@ -360,7 +360,7 @@ pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
                 Err(reason) => add_diagnostic(
                     &mut diagnostics,
                     line_number,
-                    AutoEqDiagnosticSeverity::Error,
+                    PeqDiagnosticSeverity::Error,
                     reason,
                 ),
             }
@@ -379,16 +379,16 @@ pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
             add_diagnostic(
                 &mut diagnostics,
                 line_number,
-                AutoEqDiagnosticSeverity::Error,
+                PeqDiagnosticSeverity::Error,
                 "missing ON/OFF filter state".to_string(),
             );
             continue;
         };
 
         if tokens[state_index].eq_ignore_ascii_case("off") {
-            // AutoEQ emits `Fc 0 Hz Gain 0 dB Q 0` placeholders for disabled
+            // Some tools emit `Fc 0 Hz Gain 0 dB Q 0` placeholders for disabled
             // filters; those are skipped silently. A disabled filter with real
-            // values (as written by `to_autoeq`) is kept as a disabled band.
+            // values (as written by `to_peq`) is kept as a disabled band.
             let kind = tokens
                 .get(state_index + 1)
                 .and_then(|t| match_filter_type(t));
@@ -422,7 +422,7 @@ pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
             add_diagnostic(
                 &mut diagnostics,
                 line_number,
-                AutoEqDiagnosticSeverity::Error,
+                PeqDiagnosticSeverity::Error,
                 format!(
                     "more than {} active filters; maximum is {}",
                     validation::MAX_BANDS,
@@ -436,7 +436,7 @@ pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
             add_diagnostic(
                 &mut diagnostics,
                 line_number,
-                AutoEqDiagnosticSeverity::Error,
+                PeqDiagnosticSeverity::Error,
                 "missing active filter type".to_string(),
             );
             continue;
@@ -447,7 +447,7 @@ pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
             add_diagnostic(
                 &mut diagnostics,
                 line_number,
-                AutoEqDiagnosticSeverity::Warning,
+                PeqDiagnosticSeverity::Warning,
                 format!("unsupported active filter type '{type_token}'"),
             );
             continue;
@@ -459,7 +459,7 @@ pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
                 add_diagnostic(
                     &mut diagnostics,
                     line_number,
-                    AutoEqDiagnosticSeverity::Error,
+                    PeqDiagnosticSeverity::Error,
                     reason,
                 );
                 continue;
@@ -471,7 +471,7 @@ pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
                 add_diagnostic(
                     &mut diagnostics,
                     line_number,
-                    AutoEqDiagnosticSeverity::Error,
+                    PeqDiagnosticSeverity::Error,
                     reason,
                 );
                 continue;
@@ -483,7 +483,7 @@ pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
                 add_diagnostic(
                     &mut diagnostics,
                     line_number,
-                    AutoEqDiagnosticSeverity::Error,
+                    PeqDiagnosticSeverity::Error,
                     reason,
                 );
                 continue;
@@ -500,15 +500,15 @@ pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
     }
 
     if !recognized_line {
-        anyhow::bail!("unrecognized AutoEQ input: no Preamp or Filter lines found");
+        anyhow::bail!("unrecognized PEQ input: no Preamp or Filter lines found");
     }
 
     let warnings = diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.severity == AutoEqDiagnosticSeverity::Warning)
+        .filter(|diagnostic| diagnostic.severity == PeqDiagnosticSeverity::Warning)
         .map(|diagnostic| format!("line {}: {}", diagnostic.line, diagnostic.reason))
         .collect();
-    Ok(AutoEqImport {
+    Ok(PeqImport {
         preamp_db,
         bands,
         diagnostics,
@@ -549,12 +549,12 @@ fn match_filter_type(token: &str) -> Option<BandType> {
 }
 
 fn add_diagnostic(
-    diagnostics: &mut Vec<AutoEqDiagnostic>,
+    diagnostics: &mut Vec<PeqDiagnostic>,
     line: usize,
-    severity: AutoEqDiagnosticSeverity,
+    severity: PeqDiagnosticSeverity,
     reason: String,
 ) {
-    diagnostics.push(AutoEqDiagnostic {
+    diagnostics.push(PeqDiagnostic {
         line,
         severity,
         reason,
@@ -578,16 +578,16 @@ fn parse_field(tokens: &[&str], key: &str, label: &str) -> std::result::Result<f
     Ok(parsed)
 }
 
-/// Read an AutoEQ file into a preset named after the file stem. Errors and partial
+/// Read a PEQ file into a preset named after the file stem. Errors and partial
 /// imports are rejected so a later save can never silently drop filters.
-pub fn load_autoeq_file(path: &std::path::Path) -> Result<Preset> {
+pub fn load_peq_file(path: &std::path::Path) -> Result<Preset> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let import = parse_autoeq(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let import = parse_peq(&text).with_context(|| format!("parsing {}", path.display()))?;
     if let Some(d) = import
         .diagnostics
         .iter()
-        .find(|d| d.severity == AutoEqDiagnosticSeverity::Error || import.partial)
+        .find(|d| d.severity == PeqDiagnosticSeverity::Error || import.partial)
     {
         anyhow::bail!("line {}: {}", d.line, d.reason);
     }
@@ -609,8 +609,8 @@ pub fn write_atomic(path: &std::path::Path, contents: &str) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
 }
 
-/// Serialize to the AutoEQ `ParametricEQ.txt` format understood by [`parse_autoeq`].
-pub fn to_autoeq(preset: &Preset) -> String {
+/// Serialize to the text PEQ format understood by [`parse_peq`].
+pub fn to_peq(preset: &Preset) -> String {
     let mut out = format!("Preamp: {:.1} dB\n", preset.preamp_db);
     for (i, band) in preset.bands.iter().enumerate() {
         let kind = match band.kind {
@@ -645,7 +645,7 @@ pub fn validate_match_patterns(patterns: &[String]) -> Result<()> {
 mod tests {
     use super::*;
 
-    const SAMPLE_AUTOEQ: &str = "Preamp: -4.2 dB
+    const SAMPLE_PEQ: &str = "Preamp: -4.2 dB
 Filter 1: ON LSC Fc 105 Hz Gain 4.0 dB Q 0.700
 Filter 2: ON PK Fc 250 Hz Gain -1.5 dB Q 1.000
 Filter 3: ON PK Fc 2800 Hz Gain 2.5 dB Q 1.400
@@ -765,12 +765,12 @@ q = 0.7
     }
 
     #[test]
-    fn autoeq_parses_basic_file() {
+    fn peq_parses_basic_file() {
         let text = "Preamp: -6.8 dB\n\
                      Filter 1: ON PK Fc 21 Hz Gain 6.7 dB Q 1.100\n\
                      Filter 2: OFF PK Fc 85 Hz Gain 6.9 dB Q 3.000\n\
                      Filter 3: ON LSC Fc 105 Hz Gain 4.0 dB Q 0.70\n";
-        let r = parse_autoeq(text).unwrap();
+        let r = parse_peq(text).unwrap();
         assert_eq!(r.preamp_db, -6.8);
         assert_eq!(r.bands.len(), 3);
         assert_eq!(r.bands[0].kind, BandType::Peaking);
@@ -780,13 +780,13 @@ q = 0.7
     }
 
     #[test]
-    fn autoeq_roundtrips_through_to_autoeq() {
-        let parsed = parse_autoeq(SAMPLE_AUTOEQ).unwrap();
+    fn peq_roundtrips_through_to_peq() {
+        let parsed = parse_peq(SAMPLE_PEQ).unwrap();
         let mut preset = PresetDocument::new("x");
         preset.preamp_db = parsed.preamp_db;
         preset.bands = parsed.bands;
         preset.bands[0].enabled = false;
-        let again = parse_autoeq(&to_autoeq(&preset)).unwrap();
+        let again = parse_peq(&to_peq(&preset)).unwrap();
         assert_eq!(again.preamp_db, preset.preamp_db);
         assert_eq!(again.bands, preset.bands);
     }
@@ -797,7 +797,7 @@ q = 0.7
         let mut count = 0;
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
-            let r = parse_autoeq(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let r = parse_peq(&std::fs::read_to_string(&path).unwrap()).unwrap();
             assert!(r.diagnostics.is_empty(), "{}", path.display());
             assert!(!r.bands.is_empty(), "{}", path.display());
             count += 1;
@@ -806,18 +806,18 @@ q = 0.7
     }
 
     #[test]
-    fn autoeq_warns_on_unsupported_type() {
+    fn peq_warns_on_unsupported_type() {
         let text = "Filter 1: ON XY Fc 21 Hz Gain 6.7 dB Q 1.100\n";
-        let r = parse_autoeq(text).unwrap();
+        let r = parse_peq(text).unwrap();
         assert!(r.bands.is_empty());
         assert!(r.partial);
         assert_eq!(r.diagnostics.len(), 1);
         assert_eq!(r.diagnostics[0].line, 1);
-        assert_eq!(r.diagnostics[0].severity, AutoEqDiagnosticSeverity::Warning);
+        assert_eq!(r.diagnostics[0].severity, PeqDiagnosticSeverity::Warning);
     }
 
     #[test]
-    fn autoeq_rejects_more_than_twenty_active_filters() {
+    fn peq_rejects_more_than_twenty_active_filters() {
         let mut text = String::new();
         for i in 1..=21 {
             text.push_str(&format!(
@@ -825,7 +825,7 @@ q = 0.7
                 f = 100 + i
             ));
         }
-        let r = parse_autoeq(&text).unwrap();
+        let r = parse_peq(&text).unwrap();
         assert_eq!(r.bands.len(), validation::MAX_BANDS);
         assert!(r.has_errors());
         assert!(r.diagnostics.iter().any(|diagnostic| {
@@ -834,11 +834,11 @@ q = 0.7
     }
 
     #[test]
-    fn autoeq_accepts_case_whitespace_and_crlf() {
+    fn peq_accepts_case_whitespace_and_crlf() {
         let text = "  PREAMP : -3.5 dB\r\n\
                      fIlTeR 1 : oN pK fC 100 Hz gAiN 2 dB q 1\r\n\
                      FILTER 2: ON hSc Fc 10000 Hz Gain -1 dB Q 0.7\r\n";
-        let r = parse_autoeq(text).unwrap();
+        let r = parse_peq(text).unwrap();
         assert_eq!(r.preamp_db, -3.5);
         assert_eq!(r.bands.len(), 2);
         assert_eq!(r.bands[0].kind, BandType::Peaking);
@@ -847,26 +847,26 @@ q = 0.7
     }
 
     #[test]
-    fn autoeq_ignores_malformed_off_placeholders() {
+    fn peq_ignores_malformed_off_placeholders() {
         let text =
             "Preamp: -6 dB\nFilter 1: OFF PK Fc 0 Hz Gain 0 dB Q 0\nFilter 2: OFF nonsense\n";
-        let r = parse_autoeq(text).unwrap();
+        let r = parse_peq(text).unwrap();
         assert!(r.bands.is_empty());
         assert!(r.diagnostics.is_empty());
     }
 
     #[test]
-    fn autoeq_reports_malformed_active_filter_with_line_and_reason() {
+    fn peq_reports_malformed_active_filter_with_line_and_reason() {
         let text = "Preamp: -6 dB\nFilter 1: ON PK Fc nope Hz Gain 1 dB Q 1\n";
-        let r = parse_autoeq(text).unwrap();
+        let r = parse_peq(text).unwrap();
         assert!(r.has_errors());
         assert_eq!(r.diagnostics[0].line, 2);
         assert!(r.diagnostics[0].reason.contains("Fc"));
     }
 
     #[test]
-    fn autoeq_rejects_empty_and_unrecognized_input() {
-        assert!(parse_autoeq("  \r\n\t").is_err());
-        assert!(parse_autoeq("GraphicEQ: 20 0; 100 1").is_err());
+    fn peq_rejects_empty_and_unrecognized_input() {
+        assert!(parse_peq("  \r\n\t").is_err());
+        assert!(parse_peq("GraphicEQ: 20 0; 100 1").is_err());
     }
 }
