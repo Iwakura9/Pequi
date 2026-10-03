@@ -1,3 +1,3 @@
 fn main() -> anyhow::Result<()> {
-    peq::cli::run()
+    pequi::cli::run()
 }

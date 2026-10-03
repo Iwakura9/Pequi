@@ -604,7 +604,7 @@ pub fn load_autoeq_file(path: &std::path::Path) -> Result<Preset> {
 /// Replace `path` with `contents` via a temp file in the same directory + rename.
 pub fn write_atomic(path: &std::path::Path, contents: &str) -> Result<()> {
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".peq-tmp");
+    tmp.push(".pequi-tmp");
     std::fs::write(&tmp, contents).with_context(|| format!("writing {}", path.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
 }
@@ -630,7 +630,7 @@ pub fn to_autoeq(preset: &Preset) -> String {
     out
 }
 
-/// Validate `match` glob patterns eagerly (used by `peq watch` in the future). A pattern
+/// Validate `match` glob patterns eagerly (used by `pequi watch` in the future). A pattern
 /// is just `*`-wildcard glob text; we don't compile it here, only reject empty patterns.
 pub fn validate_match_patterns(patterns: &[String]) -> Result<()> {
     for p in patterns {
@@ -687,7 +687,7 @@ q = 0.7
 
     #[test]
     fn legacy_load_does_not_rewrite_toml() {
-        let dir = std::env::temp_dir().join(format!("peq-preset-test-{}", new_id()));
+        let dir = std::env::temp_dir().join(format!("pequi-preset-test-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("legacy.toml");
         std::fs::write(&path, LEGACY_TOML).unwrap();

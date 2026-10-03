@@ -8,8 +8,8 @@ use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Name of the scratch preset peq overwrites on every apply/preview.
-pub const PRESET_NAME: &str = "peq";
+/// Name of the scratch preset pequi overwrites on every apply/preview.
+pub const PRESET_NAME: &str = "pequi";
 
 pub fn preset_json(preset: &Preset) -> Value {
     let mut channel = Map::new();
@@ -61,7 +61,7 @@ fn output_dir() -> Result<PathBuf> {
     Ok(base.join("easyeffects/output"))
 }
 
-/// Write `preset` as the `peq` EasyEffects preset and load it.
+/// Write `preset` as the `pequi` EasyEffects preset and load it.
 pub fn load(preset: &Preset) -> Result<()> {
     let dir = output_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;

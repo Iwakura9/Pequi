@@ -1,12 +1,12 @@
-# peq
+# pequi
 
 A terminal picker and editor for [AutoEQ](https://github.com/jaakkopasanen/AutoEq)
 curves, played through [EasyEffects](https://github.com/wwmm/easyeffects).
 
 Browse a folder of `ParametricEQ.txt` files as a tree, see the frequency response as a
-braille plot, and tweak bands while listening. peq does no audio processing itself:
-EasyEffects and its LSP equalizer handle that. peq just writes an EasyEffects output
-preset named `peq` and asks the running EasyEffects to load it.
+braille plot, and tweak bands while listening. pequi does no audio processing itself:
+EasyEffects and its LSP equalizer handle that. pequi just writes an EasyEffects output
+preset named `pequi` and asks the running EasyEffects to load it.
 
 Edits are previewed live, but the `.txt` file only changes when you save. Discard and
 you're back to the saved curve.
@@ -26,13 +26,13 @@ cargo install --path .
 ## Usage
 
 ```sh
-peq [DIR]
+pequi [DIR]
 ```
 
-`DIR` defaults to `~/.config/peq/profiles`. Pointing it at your AutoEQ folder with a
+`DIR` defaults to `~/.config/pequi/profiles`. Pointing it at your AutoEQ folder with a
 symlink works well.
 
-> Loading the `peq` preset replaces EasyEffects' whole output chain with that single
+> Loading the `pequi` preset replaces EasyEffects' whole output chain with that single
 > equalizer.
 
 ## Keys
