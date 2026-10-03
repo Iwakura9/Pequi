@@ -792,6 +792,20 @@ q = 0.7
     }
 
     #[test]
+    fn example_profiles_parse_cleanly() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/profiles");
+        let mut count = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let r = parse_autoeq(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert!(r.diagnostics.is_empty(), "{}", path.display());
+            assert!(!r.bands.is_empty(), "{}", path.display());
+            count += 1;
+        }
+        assert!(count > 0);
+    }
+
+    #[test]
     fn autoeq_warns_on_unsupported_type() {
         let text = "Filter 1: ON XY Fc 21 Hz Gain 6.7 dB Q 1.100\n";
         let r = parse_autoeq(text).unwrap();
