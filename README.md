@@ -1,11 +1,11 @@
-# pequi
+# Pequi
 
 A terminal picker and editor for [AutoEQ](https://github.com/jaakkopasanen/AutoEq)
 curves, played through [EasyEffects](https://github.com/wwmm/easyeffects).
 
 Browse a folder of `ParametricEQ.txt` files as a tree, see the frequency response as a
-braille plot, and tweak bands while listening. pequi does no audio processing itself:
-EasyEffects and its LSP equalizer handle that. pequi just writes an EasyEffects output
+braille plot, and tweak bands while listening. Pequi does no audio processing itself:
+EasyEffects and its LSP equalizer handle that. Pequi just writes an EasyEffects output
 preset named `pequi` and asks the running EasyEffects to load it.
 
 Edits are previewed live, but the `.txt` file only changes when you save. Discard and
