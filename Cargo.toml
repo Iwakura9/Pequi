@@ -1,10 +1,10 @@
 [package]
-name = "peq"
+name = "pequi"
 version = "0.1.0"
 edition = "2021"
 description = "Terminal picker and editor for AutoEQ curves, played through EasyEffects"
 license = "MIT"
-repository = "https://github.com/Iwakura9/peq"
+repository = "https://github.com/Iwakura9/pequi"
 readme = "README.md"
 keywords = ["equalizer", "autoeq", "easyeffects", "tui", "audio"]
 categories = ["command-line-utilities", "multimedia::audio"]

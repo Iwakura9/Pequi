@@ -48,7 +48,7 @@ impl Tree {
             .filter(|e| {
                 let name = e.file_name();
                 let name = name.to_string_lossy();
-                !name.starts_with('.') && !name.ends_with(".peq-tmp")
+                !name.starts_with('.') && !name.ends_with(".pequi-tmp")
             })
             .map(|e| (e.path().is_dir(), e.path()))
             .collect();
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn dirs_first_and_expansion_shows_children() {
-        let root = std::env::temp_dir().join(format!("peq-tree-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("pequi-tree-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("B")).unwrap();
         std::fs::write(root.join("a.txt"), "Preamp: -1 dB\n").unwrap();
