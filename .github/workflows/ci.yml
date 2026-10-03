@@ -7,30 +7,11 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        feature_args:
-          - --no-default-features
-          - ""
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install native audio build dependencies
-        if: matrix.feature_args == ''
-        run: sudo apt-get update && sudo apt-get install --yes clang libclang-dev pkg-config libpipewire-0.3-dev
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Check formatting
-        if: matrix.feature_args == '--no-default-features'
-        run: cargo fmt --all -- --check
-
-      - name: Test
-        run: cargo test --all-targets --locked ${{ matrix.feature_args }}
-
-      - name: Clippy
-        run: cargo clippy --all-targets --locked ${{ matrix.feature_args }} -- -D warnings
+      - run: cargo fmt --all -- --check
+      - run: cargo test --all-targets --locked
+      - run: cargo clippy --all-targets --locked -- -D warnings

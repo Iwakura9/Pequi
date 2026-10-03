@@ -9,7 +9,6 @@ use std::fs::File;
 use std::io::Read;
 #[cfg(test)]
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -216,58 +215,6 @@ pub enum ResolveError {
     },
 }
 
-pub fn preset_dir() -> PathBuf {
-    crate::storage::xdg_preset_dir()
-}
-
-pub fn state_dir() -> PathBuf {
-    xdg_state_dir()
-}
-
-fn xdg_state_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| PathBuf::from("/"));
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(".local/state"));
-    base.join("peq")
-}
-
-/// Sorted list of preset names (file stems) available in `preset_dir()`.
-pub fn list_presets() -> Result<Vec<String>> {
-    Ok(crate::storage::PresetStore::from_xdg()
-        .list()?
-        .entries
-        .into_iter()
-        .map(|entry| entry.document.name)
-        .collect())
-}
-
-/// List valid presets together with diagnostics for malformed library files.
-///
-/// [`list_presets`] remains the compatibility wrapper used by the existing CLI;
-/// callers that need to explain invalid files should use this form.
-pub fn list_presets_with_diagnostics() -> Result<crate::storage::PresetListing> {
-    crate::storage::PresetStore::from_xdg().list()
-}
-
-/// Descriptive alias for [`list_presets_with_diagnostics`].
-pub fn list_presets_detailed() -> Result<crate::storage::PresetListing> {
-    list_presets_with_diagnostics()
-}
-
-pub fn preset_path(name: &str) -> Result<PathBuf> {
-    validation::validate_name(name)?;
-    Ok(preset_dir().join(format!("{name}.toml")))
-}
-
-pub fn load_preset(name: &str) -> Result<Preset> {
-    Ok(crate::storage::PresetStore::from_xdg().load(name)?.document)
-}
-
 #[cfg(test)]
 fn load_preset_file(path: &Path) -> Result<Preset> {
     let text =
@@ -282,12 +229,6 @@ fn parse_preset(text: &str, path: &Path) -> Result<Preset> {
     validation::validate_preset(&preset, None)
         .with_context(|| format!("validating {}", path.display()))?;
     Ok(preset)
-}
-
-pub fn save_preset(preset: &Preset) -> Result<()> {
-    crate::storage::PresetStore::from_xdg()
-        .save(preset, crate::storage::SaveMode::Create)
-        .map(|_| ())
 }
 
 /// Resolve a (possibly partial) name against the available preset list. Tries, in order:
@@ -328,20 +269,6 @@ pub fn resolve_name(query: &str, available: &[String]) -> Result<String, Resolve
 fn is_subsequence(needle: &str, haystack: &str) -> bool {
     let mut chars = haystack.chars();
     needle.chars().all(|c| chars.any(|h| h == c))
-}
-
-pub fn read_active() -> Option<String> {
-    std::fs::read_to_string(state_dir().join("active"))
-        .ok()
-        .filter(|s| validation::validate_name(s).is_ok())
-}
-
-pub fn write_active(name: &str) -> Result<()> {
-    validation::validate_name(name)?;
-    let dir = state_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    std::fs::write(dir.join("active"), name)
-        .with_context(|| format!("writing {}", dir.join("active").display()))
 }
 
 /// Severity assigned to a line-level AutoEQ import diagnostic.
@@ -459,8 +386,28 @@ pub fn parse_autoeq(text: &str) -> Result<AutoEqImport> {
         };
 
         if tokens[state_index].eq_ignore_ascii_case("off") {
-            // AutoEQ emits `Fc 0 Hz Gain 0 dB Q 0` for disabled filters. Do
-            // not inspect those values or report validation diagnostics.
+            // AutoEQ emits `Fc 0 Hz Gain 0 dB Q 0` placeholders for disabled
+            // filters; those are skipped silently. A disabled filter with real
+            // values (as written by `to_autoeq`) is kept as a disabled band.
+            let kind = tokens
+                .get(state_index + 1)
+                .and_then(|t| match_filter_type(t));
+            let fields = (
+                parse_field(&tokens, "fc", "Fc"),
+                parse_field(&tokens, "gain", "Gain"),
+                parse_field(&tokens, "q", "Q"),
+            );
+            if let (Some(kind), (Ok(freq), Ok(gain), Ok(q))) = (kind, fields) {
+                if freq > 0.0 && q > 0.0 {
+                    bands.push(Band {
+                        kind,
+                        freq,
+                        gain,
+                        q,
+                        enabled: false,
+                    });
+                }
+            }
             continue;
         }
 
@@ -631,6 +578,58 @@ fn parse_field(tokens: &[&str], key: &str, label: &str) -> std::result::Result<f
     Ok(parsed)
 }
 
+/// Read an AutoEQ file into a preset named after the file stem. Errors and partial
+/// imports are rejected so a later save can never silently drop filters.
+pub fn load_autoeq_file(path: &std::path::Path) -> Result<Preset> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let import = parse_autoeq(&text).with_context(|| format!("parsing {}", path.display()))?;
+    if let Some(d) = import
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == AutoEqDiagnosticSeverity::Error || import.partial)
+    {
+        anyhow::bail!("line {}: {}", d.line, d.reason);
+    }
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut preset = PresetDocument::new(name);
+    preset.preamp_db = import.preamp_db;
+    preset.bands = import.bands;
+    Ok(preset)
+}
+
+/// Replace `path` with `contents` via a temp file in the same directory + rename.
+pub fn write_atomic(path: &std::path::Path, contents: &str) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".peq-tmp");
+    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", path.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+}
+
+/// Serialize to the AutoEQ `ParametricEQ.txt` format understood by [`parse_autoeq`].
+pub fn to_autoeq(preset: &Preset) -> String {
+    let mut out = format!("Preamp: {:.1} dB\n", preset.preamp_db);
+    for (i, band) in preset.bands.iter().enumerate() {
+        let kind = match band.kind {
+            BandType::Peaking => "PK",
+            BandType::Lowshelf => "LSC",
+            BandType::Highshelf => "HSC",
+        };
+        out.push_str(&format!(
+            "Filter {}: {} {kind} Fc {} Hz Gain {:.1} dB Q {:.3}\n",
+            i + 1,
+            if band.enabled { "ON" } else { "OFF" },
+            band.freq.round(),
+            band.gain,
+            band.q,
+        ));
+    }
+    out
+}
+
 /// Validate `match` glob patterns eagerly (used by `peq watch` in the future). A pattern
 /// is just `*`-wildcard glob text; we don't compile it here, only reject empty patterns.
 pub fn validate_match_patterns(patterns: &[String]) -> Result<()> {
@@ -645,6 +644,15 @@ pub fn validate_match_patterns(patterns: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SAMPLE_AUTOEQ: &str = "Preamp: -4.2 dB
+Filter 1: ON LSC Fc 105 Hz Gain 4.0 dB Q 0.700
+Filter 2: ON PK Fc 250 Hz Gain -1.5 dB Q 1.000
+Filter 3: ON PK Fc 2800 Hz Gain 2.5 dB Q 1.400
+Filter 4: ON PK Fc 6500 Hz Gain -3.0 dB Q 3.000
+Filter 5: ON HSC Fc 10000 Hz Gain 1.5 dB Q 0.700
+Filter 6: OFF PK Fc 0 Hz Gain 0.0 dB Q 0.000
+";
 
     const LEGACY_TOML: &str = r#"name = "Legacy"
 preamp_db = -6.0
@@ -764,10 +772,23 @@ q = 0.7
                      Filter 3: ON LSC Fc 105 Hz Gain 4.0 dB Q 0.70\n";
         let r = parse_autoeq(text).unwrap();
         assert_eq!(r.preamp_db, -6.8);
-        assert_eq!(r.bands.len(), 2);
+        assert_eq!(r.bands.len(), 3);
         assert_eq!(r.bands[0].kind, BandType::Peaking);
-        assert_eq!(r.bands[1].kind, BandType::Lowshelf);
+        assert!(!r.bands[1].enabled);
+        assert_eq!(r.bands[2].kind, BandType::Lowshelf);
         assert!(r.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn autoeq_roundtrips_through_to_autoeq() {
+        let parsed = parse_autoeq(SAMPLE_AUTOEQ).unwrap();
+        let mut preset = PresetDocument::new("x");
+        preset.preamp_db = parsed.preamp_db;
+        preset.bands = parsed.bands;
+        preset.bands[0].enabled = false;
+        let again = parse_autoeq(&to_autoeq(&preset)).unwrap();
+        assert_eq!(again.preamp_db, preset.preamp_db);
+        assert_eq!(again.bands, preset.bands);
     }
 
     #[test]

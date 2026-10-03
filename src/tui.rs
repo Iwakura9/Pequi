@@ -1,16 +1,12 @@
-//! Preset editor. Table of bands + preamp, live curve preview (computed locally, instant),
-//! explicit apply-to-sink action, save with confirmation.
-//!
-//! NOTE (NOTES.md): the spec called for live-apply on every edit debounced ~100ms, but that
-//! assumed a cheap runtime write. Since applying now means a full PipeWire restart (see
-//! chain.rs), auto-applying on every keystroke would restart the audio system dozens of
-//! times a second while dragging a value. Instead, the curve preview is instant and local
-//! (no PipeWire round-trip), and pushing it to the real sink is an explicit action (`a`),
-//! itself debounced so holding the key doesn't queue up repeated restarts.
+//! Two screens: a file tree of AutoEQ presets, and an EQ view (braille response curve on
+//! top, editable band table below). Edits change only an in-memory draft that is
+//! previewed live through EasyEffects; the file on disk changes only on save.
 
-use crate::application;
 use crate::dsp::{preset_response_db, BandType, FS};
-use crate::preset::Preset;
+use crate::easyeffects;
+use crate::library::Tree;
+use crate::preset::{load_autoeq_file, to_autoeq, write_atomic, Band, Preset};
+use crate::validation as v;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -20,11 +16,25 @@ use crossterm::terminal::{
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table};
 use std::io::stdout;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-const APPLY_DEBOUNCE: Duration = Duration::from_millis(800);
+const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(150);
+
+pub fn run(root: PathBuf) -> Result<()> {
+    let _session = TerminalSession::enter(CrosstermTerminalOps)?;
+    let backend = ratatui::backend::CrosstermBackend::new(stdout());
+    let mut terminal = ratatui::Terminal::new(backend)?;
+    App::new(root).event_loop(&mut terminal)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Screen {
+    Tree,
+    Eq,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Field {
@@ -33,12 +43,500 @@ enum Field {
     Q,
 }
 
-pub fn run(preset: Preset) -> Result<()> {
-    let _session = TerminalSession::enter(CrosstermTerminalOps)?;
-    let out = stdout();
-    let backend = ratatui::backend::CrosstermBackend::new(out);
-    let mut terminal = ratatui::Terminal::new(backend)?;
-    event_loop(&mut terminal, preset)
+/// What to do once an unsaved draft has been saved or discarded.
+#[derive(Clone, PartialEq)]
+enum After {
+    Open(PathBuf),
+    Quit,
+}
+
+struct Open {
+    path: PathBuf,
+    saved: Preset,
+    draft: Preset,
+}
+
+struct App {
+    screen: Screen,
+    tree: Tree,
+    open: Option<Open>,
+    row: usize, // 0 = preamp, 1.. = bands[row-1]
+    field: Field,
+    preview_due: Option<Instant>,
+    confirm: Option<After>,
+    show_help: bool,
+    bypassed: bool,
+    status: String,
+}
+
+impl App {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            screen: Screen::Tree,
+            tree: Tree::new(root),
+            open: None,
+            row: 0,
+            field: Field::Gain,
+            preview_due: None,
+            confirm: None,
+            show_help: false,
+            bypassed: easyeffects::bypassed().unwrap_or(false),
+            status: "enter: open   b: bypass   tab: switch screen   ?: help   q: quit".into(),
+        }
+    }
+
+    fn dirty(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.draft != o.saved)
+    }
+
+    fn event_loop(
+        &mut self,
+        terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend>,
+    ) -> Result<()> {
+        loop {
+            if self.preview_due.is_some_and(|t| Instant::now() >= t) {
+                self.preview_due = None;
+                if let Some(o) = &self.open {
+                    self.report(easyeffects::load(&o.draft), "previewing (unsaved)");
+                }
+            }
+            terminal.draw(|f| self.draw(f))?;
+
+            let timeout = if self.preview_due.is_some() { 30 } else { 250 };
+            if !event::poll(Duration::from_millis(timeout))? {
+                continue;
+            }
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            let ctrl_c =
+                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+
+            if let Some(after) = self.confirm.take() {
+                match key.code {
+                    KeyCode::Char('s') => {
+                        if !self.save() {
+                            continue;
+                        }
+                    }
+                    KeyCode::Char('d') => self.discard(),
+                    _ => {
+                        self.status = "cancelled".into();
+                        continue;
+                    }
+                }
+                match after {
+                    After::Quit => return Ok(()),
+                    After::Open(path) => self.open_file(path),
+                }
+                continue;
+            }
+
+            if ctrl_c || key.code == KeyCode::Char('q') {
+                if self.leave(After::Quit) {
+                    return Ok(());
+                }
+                continue;
+            }
+            match key.code {
+                KeyCode::Char('?') => self.show_help = !self.show_help,
+                KeyCode::Char('b') => {
+                    let on = !self.bypassed;
+                    let result = easyeffects::set_bypass(on);
+                    if result.is_ok() {
+                        self.bypassed = on;
+                    }
+                    self.report(result, if on { "bypass ON" } else { "bypass off" });
+                }
+                KeyCode::Tab => {
+                    self.screen = match self.screen {
+                        Screen::Tree if self.open.is_some() => Screen::Eq,
+                        _ => Screen::Tree,
+                    }
+                }
+                _ => match self.screen {
+                    Screen::Tree => self.tree_key(key.code),
+                    Screen::Eq => self.eq_key(key.code),
+                },
+            }
+        }
+    }
+
+    /// Ask before leaving a dirty draft; returns true when it is fine to proceed now.
+    fn leave(&mut self, after: After) -> bool {
+        if !self.dirty() {
+            return true;
+        }
+        self.confirm = Some(after);
+        self.status = "unsaved changes - s: save, d: discard, other key: cancel".into();
+        false
+    }
+
+    fn report(&mut self, result: Result<()>, ok: &str) {
+        self.status = match result {
+            Ok(()) => ok.to_string(),
+            Err(e) => format!("error: {e:#}"),
+        };
+    }
+
+    fn open_file(&mut self, path: PathBuf) {
+        match load_autoeq_file(&path) {
+            Ok(preset) => {
+                let result = easyeffects::load(&preset);
+                self.report(result, &format!("loaded {}", preset.name));
+                self.open = Some(Open {
+                    path,
+                    saved: preset.clone(),
+                    draft: preset,
+                });
+                self.row = 0;
+                self.preview_due = None;
+                self.screen = Screen::Eq;
+            }
+            Err(e) => self.status = format!("cannot open: {e:#}"),
+        }
+    }
+
+    fn save(&mut self) -> bool {
+        let Some(o) = &mut self.open else {
+            return false;
+        };
+        match write_atomic(&o.path, &to_autoeq(&o.draft)) {
+            Ok(()) => {
+                o.saved = o.draft.clone();
+                self.status = format!("saved {}", o.path.display());
+                self.tree.refresh();
+                true
+            }
+            Err(e) => {
+                self.status = format!("save failed: {e:#}");
+                false
+            }
+        }
+    }
+
+    /// Drop the draft and put the saved curve back into EasyEffects.
+    fn discard(&mut self) {
+        if let Some(o) = &mut self.open {
+            o.draft = o.saved.clone();
+            self.preview_due = None;
+            let result = easyeffects::load(&o.saved);
+            self.report(result, "discarded changes");
+            self.row = self
+                .row
+                .min(self.open.as_ref().map_or(0, |o| o.draft.bands.len()));
+        }
+    }
+
+    fn tree_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => self.tree.move_by(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.tree.move_by(1),
+            KeyCode::PageUp => self.tree.move_by(-10),
+            KeyCode::PageDown => self.tree.move_by(10),
+            KeyCode::Left | KeyCode::Char('h') => self.tree.set_expanded(false),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                let Some(node) = self.tree.selected().cloned() else {
+                    return;
+                };
+                if node.is_dir {
+                    let open = self.tree.expanded.contains(&node.path);
+                    self.tree.set_expanded(!open || code != KeyCode::Enter);
+                } else if self.open.as_ref().is_some_and(|o| o.path == node.path) {
+                    self.screen = Screen::Eq;
+                } else if self.leave(After::Open(node.path.clone())) {
+                    self.open_file(node.path);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn eq_key(&mut self, code: KeyCode) {
+        let Some(o) = &mut self.open else {
+            return;
+        };
+        let rows = 1 + o.draft.bands.len();
+        let before = o.draft.clone();
+        match code {
+            KeyCode::Esc => self.screen = Screen::Tree,
+            KeyCode::Up | KeyCode::Char('k') => self.row = (self.row + rows - 1) % rows,
+            KeyCode::Down | KeyCode::Char('j') => self.row = (self.row + 1) % rows,
+            KeyCode::Left | KeyCode::Char('h') => self.next_field(false),
+            KeyCode::Right | KeyCode::Char('l') => self.next_field(true),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.adjust(false, true),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.adjust(false, false),
+            KeyCode::Char(']') => self.adjust(true, true),
+            KeyCode::Char('[') => self.adjust(true, false),
+            KeyCode::Char('t') if self.row > 0 => {
+                let b = &mut o.draft.bands[self.row - 1];
+                b.kind = match b.kind {
+                    BandType::Peaking => BandType::Lowshelf,
+                    BandType::Lowshelf => BandType::Highshelf,
+                    BandType::Highshelf => BandType::Peaking,
+                };
+            }
+            KeyCode::Char(' ') if self.row > 0 => {
+                let b = &mut o.draft.bands[self.row - 1];
+                b.enabled = !b.enabled;
+            }
+            KeyCode::Char('n') if o.draft.bands.len() < v::MAX_BANDS => {
+                let at = self.row; // insert after the selected row
+                o.draft.bands.insert(
+                    at,
+                    Band {
+                        kind: BandType::Peaking,
+                        freq: 1000.0,
+                        gain: 0.0,
+                        q: 1.0,
+                        enabled: true,
+                    },
+                );
+                self.row = at + 1;
+            }
+            KeyCode::Char('x') if self.row > 0 => {
+                o.draft.bands.remove(self.row - 1);
+                self.row -= 1;
+            }
+            KeyCode::Char('s') => {
+                self.save();
+            }
+            KeyCode::Char('u') => self.discard(),
+            _ => {}
+        }
+        if self.open.as_ref().is_some_and(|o| o.draft != before) {
+            self.preview_due = Some(Instant::now() + PREVIEW_DEBOUNCE);
+        }
+    }
+
+    fn next_field(&mut self, forward: bool) {
+        let order = [Field::Freq, Field::Gain, Field::Q];
+        let idx = order.iter().position(|f| *f == self.field).unwrap_or(0);
+        let step = if forward { 1 } else { order.len() - 1 };
+        self.field = order[(idx + step) % order.len()];
+    }
+
+    fn adjust(&mut self, coarse: bool, up: bool) {
+        let Some(o) = &mut self.open else {
+            return;
+        };
+        let sign = if up { 1.0 } else { -1.0 };
+        if self.row == 0 {
+            let step = if coarse { 1.0 } else { 0.1 };
+            o.draft.preamp_db = round_to(o.draft.preamp_db + sign * step, 0.1)
+                .clamp(v::MIN_PREAMP_DB, v::MAX_PREAMP_DB);
+            return;
+        }
+        let band = &mut o.draft.bands[self.row - 1];
+        match self.field {
+            Field::Freq => {
+                let mult: f64 = if coarse { 1.2 } else { 1.02 };
+                let f = band.freq * if up { mult } else { 1.0 / mult };
+                band.freq = f.round().clamp(v::MIN_FREQUENCY_HZ, v::MAX_FREQUENCY_HZ);
+            }
+            Field::Gain => {
+                let step = if coarse { 1.0 } else { 0.1 };
+                band.gain =
+                    round_to(band.gain + sign * step, 0.1).clamp(v::MIN_GAIN_DB, v::MAX_GAIN_DB);
+            }
+            Field::Q => {
+                let step = if coarse { 0.1 } else { 0.01 };
+                band.q = round_to(band.q + sign * step, 0.001).clamp(v::MIN_Q, v::MAX_Q);
+            }
+        }
+    }
+
+    fn draw(&self, f: &mut ratatui::Frame) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(5), Constraint::Length(1)])
+            .split(f.area());
+        match (self.screen, &self.open) {
+            (Screen::Eq, Some(o)) => self.draw_eq(f, o, chunks[0]),
+            _ => self.draw_tree(f, chunks[0]),
+        }
+        let status = if self.show_help {
+            match self.screen {
+                Screen::Tree => "j/k: move  l/enter: open/expand  h: collapse  b: bypass  tab: EQ screen  q: quit",
+                Screen::Eq => "j/k: row  h/l: field  +/-: fine  [/]: coarse  t: type  space: on/off  n: add  x: delete  b: bypass  s: save  u: discard  esc/tab: tree  q: quit",
+            }
+        } else {
+            self.status.as_str()
+        };
+        let mut line = vec![Span::raw(status)];
+        if self.bypassed {
+            line.insert(
+                0,
+                Span::styled(
+                    " BYPASS ",
+                    Style::default().fg(Color::Black).bg(Color::Yellow),
+                ),
+            );
+            line.insert(1, Span::raw(" "));
+        }
+        f.render_widget(Paragraph::new(Line::from(line)), chunks[1]);
+    }
+
+    fn draw_tree(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let open_path = self.open.as_ref().map(|o| &o.path);
+        let items: Vec<ListItem> = self
+            .tree
+            .visible
+            .iter()
+            .map(|n| {
+                let name = n.path.file_name().unwrap_or_default().to_string_lossy();
+                let icon = match (n.is_dir, self.tree.expanded.contains(&n.path)) {
+                    (true, true) => "▾ ",
+                    (true, false) => "▸ ",
+                    _ => "  ",
+                };
+                let mut style = Style::default();
+                if n.is_dir {
+                    style = style.fg(Color::Cyan).add_modifier(Modifier::BOLD);
+                } else if !n.ok {
+                    style = style.fg(Color::DarkGray);
+                }
+                let mut spans = vec![
+                    Span::raw("  ".repeat(n.depth)),
+                    Span::styled(format!("{icon}{name}"), style),
+                ];
+                if !n.ok {
+                    spans.push(Span::styled(" !", Style::default().fg(Color::Yellow)));
+                }
+                if open_path == Some(&n.path) {
+                    let mark = if self.dirty() { " ● *" } else { " ●" };
+                    spans.push(Span::styled(mark, Style::default().fg(Color::Green)));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} ", self.tree.root.display())),
+            )
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        let mut state = ListState::default().with_selected(Some(self.tree.cursor));
+        f.render_stateful_widget(list, area, &mut state);
+    }
+
+    fn draw_eq(&self, f: &mut ratatui::Frame, o: &Open, area: ratatui::layout::Rect) {
+        let table_height = (o.draft.bands.len() as u16 + 4).min(area.height / 2);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(6), Constraint::Length(table_height)])
+            .split(area);
+
+        let title = format!(
+            " {}{}  preamp {:.1} dB ",
+            o.draft.name,
+            if self.dirty() { " * (unsaved)" } else { "" },
+            o.draft.preamp_db
+        );
+        let curve = chunks[0];
+        let width = curve.width.saturating_sub(2).max(10) as usize;
+        let height = curve.height.saturating_sub(2).max(3) as usize;
+        let lines = crate::render::plot(|hz| preset_response_db(&o.draft, hz, FS), width, height);
+        let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
+        f.render_widget(
+            Paragraph::new(text)
+                .style(Style::default().fg(Color::Cyan))
+                .block(Block::default().borders(Borders::ALL).title(title)),
+            curve,
+        );
+
+        let rows: Vec<Row> = std::iter::once(self.preamp_row(o))
+            .chain((0..o.draft.bands.len()).map(|i| self.band_row(o, i)))
+            .collect();
+        let selected = self.row;
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(4),
+                Constraint::Length(11),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(8),
+            ],
+        )
+        .header(
+            Row::new(["on", "type", "freq (Hz)", "gain (dB)", "q"])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .block(Block::default().borders(Borders::ALL).title(" bands "));
+        let mut state = ratatui::widgets::TableState::default().with_selected(Some(selected));
+        f.render_stateful_widget(table, chunks[1], &mut state);
+    }
+
+    fn preamp_row(&self, o: &Open) -> Row<'static> {
+        let sel = self.row == 0;
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from(label("preamp", sel)),
+            Cell::from(""),
+            Cell::from(Span::styled(
+                format!("{:.1}", o.draft.preamp_db),
+                field_style(sel),
+            )),
+            Cell::from(""),
+        ])
+    }
+
+    fn band_row(&self, o: &Open, i: usize) -> Row<'static> {
+        let b = &o.draft.bands[i];
+        let sel = self.row == i + 1;
+        let kind = match b.kind {
+            BandType::Peaking => "peaking",
+            BandType::Lowshelf => "lowshelf",
+            BandType::Highshelf => "highshelf",
+        };
+        let row = Row::new(vec![
+            Cell::from(if b.enabled { "[x]" } else { "[ ]" }),
+            Cell::from(label(kind, sel)),
+            Cell::from(Span::styled(
+                format!("{:.0}", b.freq),
+                field_style(sel && self.field == Field::Freq),
+            )),
+            Cell::from(Span::styled(
+                format!("{:.1}", b.gain),
+                field_style(sel && self.field == Field::Gain),
+            )),
+            Cell::from(Span::styled(
+                format!("{:.2}", b.q),
+                field_style(sel && self.field == Field::Q),
+            )),
+        ]);
+        if b.enabled {
+            row
+        } else {
+            row.style(Style::default().fg(Color::DarkGray))
+        }
+    }
+}
+
+fn round_to(x: f64, step: f64) -> f64 {
+    (x / step).round() * step
+}
+
+fn label(text: &str, selected: bool) -> Span<'static> {
+    let style = if selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    Span::styled(text.to_string(), style)
+}
+
+fn field_style(selected: bool) -> Style {
+    if selected {
+        Style::default().fg(Color::Black).bg(Color::Yellow)
+    } else {
+        Style::default()
+    }
 }
 
 trait TerminalOps {
@@ -100,261 +598,6 @@ impl<T: TerminalOps> Drop for TerminalSession<T> {
             let _ = self.ops.disable_raw();
             self.raw = false;
         }
-    }
-}
-
-struct State {
-    preset: Preset,
-    row: usize, // 0 = preamp, 1.. = bands[row-1]
-    field: Field,
-    dirty: bool,
-    show_help: bool,
-    quit_confirm: bool,
-    status: String,
-    last_apply: Option<Instant>,
-}
-
-impl State {
-    fn n_rows(&self) -> usize {
-        1 + self.preset.bands.len()
-    }
-
-    fn adjust(&mut self, coarse: bool, up: bool) {
-        let sign = if up { 1.0 } else { -1.0 };
-        if self.row == 0 {
-            let step = if coarse { 1.0 } else { 0.1 };
-            self.preset.preamp_db += sign * step;
-        } else {
-            let band = &mut self.preset.bands[self.row - 1];
-            match self.field {
-                Field::Freq => {
-                    let mult = if coarse { 1.2 } else { 1.05 };
-                    band.freq = (if up {
-                        band.freq * mult
-                    } else {
-                        band.freq / mult
-                    })
-                    .clamp(20.0, 20_000.0);
-                }
-                Field::Gain => {
-                    let step = if coarse { 1.0 } else { 0.1 };
-                    band.gain += sign * step;
-                }
-                Field::Q => {
-                    let step = if coarse { 0.1 } else { 0.01 };
-                    band.q = (band.q + sign * step).max(0.01);
-                }
-            }
-        }
-        self.dirty = true;
-    }
-
-    fn next_field(&mut self, forward: bool) {
-        if self.row == 0 {
-            return;
-        }
-        let order = [Field::Freq, Field::Gain, Field::Q];
-        let idx = order.iter().position(|f| *f == self.field).unwrap_or(0);
-        let next = if forward {
-            (idx + 1) % order.len()
-        } else {
-            (idx + order.len() - 1) % order.len()
-        };
-        self.field = order[next];
-    }
-}
-
-fn event_loop(
-    terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend>,
-    preset: Preset,
-) -> Result<()> {
-    let mut state = State {
-        preset,
-        row: 0,
-        field: Field::Freq,
-        dirty: false,
-        show_help: false,
-        quit_confirm: false,
-        status:
-            "arrows: navigate/adjust  +/-: fine  [/]: coarse  a: apply  s: save  ?: help  q: quit"
-                .into(),
-        last_apply: None,
-    };
-
-    loop {
-        terminal.draw(|f| draw(f, &state))?;
-
-        if !event::poll(Duration::from_millis(200))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return Ok(());
-        }
-        state.quit_confirm = state.quit_confirm && key.code == KeyCode::Char('q');
-
-        match key.code {
-            KeyCode::Char('?') => state.show_help = !state.show_help,
-            KeyCode::Char('q') | KeyCode::Esc => {
-                if state.dirty && !state.quit_confirm {
-                    state.quit_confirm = true;
-                    state.status =
-                        "unsaved changes - press q again to discard, or s to save".into();
-                } else {
-                    return Ok(());
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                state.row = state.row.checked_sub(1).unwrap_or(state.n_rows() - 1) % state.n_rows();
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                state.row = (state.row + 1) % state.n_rows();
-            }
-            KeyCode::Left | KeyCode::Char('h') => state.next_field(false),
-            KeyCode::Right | KeyCode::Char('l') => state.next_field(true),
-            KeyCode::Char('+') | KeyCode::Char('=') => state.adjust(false, true),
-            KeyCode::Char('-') | KeyCode::Char('_') => state.adjust(false, false),
-            KeyCode::Char(']') => state.adjust(true, true),
-            KeyCode::Char('[') => state.adjust(true, false),
-            KeyCode::Char('s') => {
-                crate::preset::save_preset(&state.preset)?;
-                state.dirty = false;
-                state.status = format!("saved {}", state.preset.name);
-            }
-            KeyCode::Char('a') => {
-                let ready = state
-                    .last_apply
-                    .is_none_or(|t| t.elapsed() >= APPLY_DEBOUNCE);
-                if ready {
-                    state.last_apply = Some(Instant::now());
-                    match application::apply_preset(&state.preset) {
-                        Ok(()) => state.status = "applied to sink".into(),
-                        Err(e) => state.status = format!("apply failed: {e}"),
-                    }
-                } else {
-                    state.status = "applying too fast - hold on".into();
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn draw(f: &mut ratatui::Frame, state: &State) {
-    let area = f.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Percentage(50),
-            Constraint::Min(6),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    let title = format!(
-        "{}{}  preamp {:.1} dB",
-        state.preset.name,
-        if state.dirty { " *" } else { "" },
-        state.preset.preamp_db
-    );
-    f.render_widget(
-        Paragraph::new(title).style(Style::default().add_modifier(Modifier::BOLD)),
-        chunks[0],
-    );
-
-    let rows: Vec<Row> = std::iter::once(preamp_row(state))
-        .chain((0..state.preset.bands.len()).map(|i| band_row(state, i)))
-        .collect();
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(8),
-        ],
-    )
-    .header(
-        Row::new(["type", "freq (Hz)", "gain (dB)", "q"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-    )
-    .block(Block::default().borders(Borders::ALL).title("bands"));
-    f.render_widget(table, chunks[1]);
-
-    let curve_area = chunks[2];
-    let width = curve_area.width.saturating_sub(2).max(10) as usize;
-    let height = curve_area.height.saturating_sub(2).max(3) as usize;
-    let lines = crate::render::plot(|f| preset_response_db(&state.preset, f, FS), width, height);
-    let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
-    f.render_widget(
-        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("response")),
-        curve_area,
-    );
-
-    let status = if state.show_help {
-        "?: close help   up/down/j/k: row   left/right/h/l: field   +/-: fine   [/]: coarse   a: apply to sink   s: save   q: quit"
-    } else {
-        state.status.as_str()
-    };
-    f.render_widget(Paragraph::new(status), chunks[3]);
-}
-
-fn preamp_row(state: &State) -> Row<'static> {
-    let sel = state.row == 0;
-    let val = Span::styled(format!("{:.1}", state.preset.preamp_db), field_style(sel));
-    Row::new(vec![
-        Cell::from(row_label("preamp", sel)),
-        Cell::from(val),
-        Cell::from(""),
-        Cell::from(""),
-    ])
-}
-
-fn band_row(state: &State, i: usize) -> Row<'static> {
-    let b = &state.preset.bands[i];
-    let sel = state.row == i + 1;
-    let kind = match b.kind {
-        BandType::Peaking => "peaking",
-        BandType::Lowshelf => "lowshelf",
-        BandType::Highshelf => "highshelf",
-    };
-    Row::new(vec![
-        Cell::from(row_label(kind, sel)),
-        Cell::from(Span::styled(
-            format!("{:.0}", b.freq),
-            field_style(sel && state.field == Field::Freq),
-        )),
-        Cell::from(Span::styled(
-            format!("{:.1}", b.gain),
-            field_style(sel && state.field == Field::Gain),
-        )),
-        Cell::from(Span::styled(
-            format!("{:.2}", b.q),
-            field_style(sel && state.field == Field::Q),
-        )),
-    ])
-}
-
-fn row_label(text: &str, selected: bool) -> Span<'static> {
-    let style = if selected {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
-    Span::styled(text.to_string(), style)
-}
-
-fn field_style(selected: bool) -> Style {
-    if selected {
-        Style::default().fg(Color::Black).bg(Color::Yellow)
-    } else {
-        Style::default()
     }
 }
 

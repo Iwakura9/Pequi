@@ -3,17 +3,12 @@ name = "peq"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-default = ["native-audio"]
-native-audio = ["dep:pipewire"]
-
 [[bin]]
 name = "peq"
 path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -21,6 +16,5 @@ anyhow = "1"
 thiserror = "1"
 ratatui = "0.29"
 crossterm = "0.28"
-pipewire = { version = "0.10", optional = true }
 
 [dev-dependencies]
