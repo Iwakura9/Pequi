@@ -634,7 +634,7 @@ mod tests {
 
         let mut block = vec![0.0_f32; 2 * 64];
         block[0] = 1.0;
-        for frame in block.chunks_exact_mut(2) {
+        for frame in block.as_chunks_mut::<2>().0 {
             let input = frame[0] as f64 * bank.preamp_linear;
             let mut expected = input;
             for (index, state) in states.iter_mut().take(bank.len).enumerate() {
@@ -709,13 +709,17 @@ mod tests {
         let mut block = vec![0.0_f32; 2 * 128];
         block[0] = 1.0;
         processor.process_interleaved(&mut block);
-        assert!(block.chunks_exact(2).all(|frame| frame[1] == 0.0));
+        assert!(block.as_chunks::<2>().0.iter().all(|frame| frame[1] == 0.0));
 
         let mut right_only = vec![0.0_f32; 2 * 128];
         right_only[1] = 1.0;
         processor.reset();
         processor.process_interleaved(&mut right_only);
-        assert!(right_only.chunks_exact(2).all(|frame| frame[0] == 0.0));
+        assert!(right_only
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .all(|frame| frame[0] == 0.0));
     }
 
     #[test]
