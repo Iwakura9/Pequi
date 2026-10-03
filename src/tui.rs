@@ -1,11 +1,11 @@
-//! Two screens: a file tree of AutoEQ presets, and an EQ view (braille response curve on
+//! Two screens: a file tree of PEQ presets, and an EQ view (braille response curve on
 //! top, editable band table below). Edits change only an in-memory draft that is
 //! previewed live through EasyEffects; the file on disk changes only on save.
 
 use crate::dsp::{preset_response_db, BandType, FS};
 use crate::easyeffects;
 use crate::library::Tree;
-use crate::preset::{load_autoeq_file, to_autoeq, write_atomic, Band, Preset};
+use crate::preset::{load_peq_file, to_peq, write_atomic, Band, Preset};
 use crate::validation as v;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -183,7 +183,7 @@ impl App {
     }
 
     fn open_file(&mut self, path: PathBuf) {
-        match load_autoeq_file(&path) {
+        match load_peq_file(&path) {
             Ok(preset) => {
                 let result = easyeffects::load(&preset);
                 self.report(result, &format!("loaded {}", preset.name));
@@ -204,7 +204,7 @@ impl App {
         let Some(o) = &mut self.open else {
             return false;
         };
-        match write_atomic(&o.path, &to_autoeq(&o.draft)) {
+        match write_atomic(&o.path, &to_peq(&o.draft)) {
             Ok(()) => {
                 o.saved = o.draft.clone();
                 self.status = format!("saved {}", o.path.display());

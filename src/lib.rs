@@ -1,4 +1,4 @@
-//! `pequi`: a terminal picker/editor for EasyEffects EQ curves stored as AutoEQ files.
+//! `pequi`: a terminal picker/editor for EasyEffects EQ curves stored as PEQ files.
 
 pub mod cli;
 pub mod dsp;
