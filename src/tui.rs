@@ -13,7 +13,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -423,23 +423,32 @@ impl App {
                 line.push(Span::raw(" "));
             }
         }
-        if self.show_help && self.screen == Screen::Eq {
-            line.push(Span::raw("space: on/off  "));
-            // Each word's first letter is its key, shown highlighted.
-            for word in ["solo", "new", "delete", "bypass", "undo", "quit"] {
-                let (key, rest) = word.split_at(1);
-                line.push(Span::styled(
-                    key,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                ));
-                line.push(Span::raw(format!("{rest}  ")));
-            }
-        } else {
+        if !(self.show_help && self.screen == Screen::Eq) {
             line.push(Span::raw(self.status.as_str()));
+            f.render_widget(Paragraph::new(Line::from(line)), chunks[1]);
+            return;
         }
-        f.render_widget(Paragraph::new(Line::from(line)), chunks[1]);
+        // Help: badges on the left, then the words spread evenly over the rest of the
+        // line. Each word's first letter is its key, shown highlighted.
+        let words = ["solo", "new", "delete", "bypass", "undo", "quit"];
+        let badges = Line::from(line);
+        let [left, right] = Layout::horizontal([
+            Constraint::Length(badges.width() as u16),
+            Constraint::Min(0),
+        ])
+        .areas(chunks[1]);
+        f.render_widget(badges, left);
+        let cells = Layout::horizontal(words.map(|w| Constraint::Length(w.len() as u16)))
+            .flex(Flex::SpaceAround)
+            .split(right);
+        let key_style = Style::default()
+            .fg(Color::Rgb(150, 200, 255))
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        for (word, cell) in words.iter().zip(cells.iter()) {
+            let (key, rest) = word.split_at(1);
+            let hint = Line::from(vec![Span::styled(key, key_style), Span::raw(rest)]);
+            f.render_widget(hint, *cell);
+        }
     }
 
     fn draw_tree(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
