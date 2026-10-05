@@ -96,7 +96,7 @@ impl App {
             bypassed: false,
             solo: None,
             flat: false,
-            status: "enter: open   b: bypass   tab: switch screen   ?: help   q: quit".into(),
+            status: String::new(),
         }
     }
 
@@ -312,7 +312,7 @@ impl App {
                         }
                     }
                 }
-                KeyCode::Char('x') if self.row > 0 => {
+                KeyCode::Char('d') if self.row > 0 => {
                     let i = self.row - 1;
                     o.draft.bands.remove(i);
                     self.row -= 1;
@@ -413,11 +413,8 @@ impl App {
             (Screen::Eq, Some(o)) => self.draw_eq(f, o, chunks[0]),
             _ => self.draw_tree(f, chunks[0]),
         }
-        let status = if self.show_help {
-            match self.screen {
-                Screen::Tree => "j/k: move  enter: open/expand  b: bypass  tab: EQ screen  q: quit",
-                Screen::Eq => "+/-: adjust  enter: edit  space: on/off  s: solo  n: add  x: delete  b: bypass  ctrl+s: save  u: discard  esc/tab: tree  q: quit",
-            }
+        let status = if self.show_help && self.screen == Screen::Eq {
+            "space: on/off  s: solo  n: add  d: delete  b: bypass  u: discard  q: quit"
         } else {
             self.status.as_str()
         };

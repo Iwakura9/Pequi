@@ -66,7 +66,7 @@ generic tonal tilts, not tuned to any particular headphone.
 | EQ | `Enter` | type a value, or pick the band type from a list |
 | EQ | `space` | enable / disable band |
 | EQ | `s` | solo band (not saved) |
-| EQ | `n` / `x` | add / delete band |
+| EQ | `n` / `d` | add / delete band |
 | EQ | `Ctrl+s` | save |
 | EQ | `u` | discard |
 | EQ | `Esc` / `Tab` | back to the tree |
