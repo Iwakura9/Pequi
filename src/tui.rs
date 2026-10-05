@@ -439,10 +439,10 @@ impl App {
         .areas(chunks[1]);
         f.render_widget(badges, left);
         let cells = Layout::horizontal(words.map(|w| Constraint::Length(w.len() as u16)))
-            .flex(Flex::SpaceAround)
+            .flex(Flex::SpaceBetween)
             .split(right);
         let key_style = Style::default()
-            .fg(Color::Rgb(150, 200, 255))
+            .fg(Color::Rgb(190, 225, 255))
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         for (word, cell) in words.iter().zip(cells.iter()) {
             let (key, rest) = word.split_at(1);
