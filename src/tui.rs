@@ -413,11 +413,6 @@ impl App {
             (Screen::Eq, Some(o)) => self.draw_eq(f, o, chunks[0]),
             _ => self.draw_tree(f, chunks[0]),
         }
-        let status = if self.show_help && self.screen == Screen::Eq {
-            "space: on/off  s: solo  n: add  d: delete  b: bypass  u: discard  q: quit"
-        } else {
-            self.status.as_str()
-        };
         let mut line = Vec::new();
         for (on, badge) in [(self.flat, " FLAT "), (self.bypassed, " BYPASS ")] {
             if on {
@@ -428,7 +423,19 @@ impl App {
                 line.push(Span::raw(" "));
             }
         }
-        line.push(Span::raw(status));
+        if self.show_help && self.screen == Screen::Eq {
+            // Each word's first letter is its key, shown in bold.
+            for word in ["solo", "new", "delete", "bypass", "undo", "quit"] {
+                let (key, rest) = word.split_at(1);
+                line.push(Span::styled(
+                    key,
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+                line.push(Span::raw(format!("{rest}  ")));
+            }
+        } else {
+            line.push(Span::raw(self.status.as_str()));
+        }
         f.render_widget(Paragraph::new(Line::from(line)), chunks[1]);
     }
 
