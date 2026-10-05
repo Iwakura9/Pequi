@@ -133,7 +133,11 @@ mod tests {
         let names: Vec<_> = tree
             .visible
             .iter()
-            .map(|n| n.path.to_string_lossy().replace(&format!("{}/", root.display()), ""))
+            .map(|n| {
+                n.path
+                    .to_string_lossy()
+                    .replace(&format!("{}/", root.display()), "")
+            })
             .collect();
         assert_eq!(names, ["", "B", "a.txt", "bad"]);
         assert!(tree.visible[2].ok && !tree.visible[3].ok);

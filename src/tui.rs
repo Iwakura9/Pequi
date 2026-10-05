@@ -66,6 +66,9 @@ struct App {
     confirm: Option<After>,
     show_help: bool,
     bypassed: bool,
+    solo: Option<usize>,
+    /// The built-in Flat is playing instead of the open draft.
+    flat: bool,
     status: String,
 }
 
@@ -80,7 +83,9 @@ impl App {
             preview_due: None,
             confirm: None,
             show_help: false,
-            bypassed: easyeffects::bypassed().unwrap_or(false),
+            bypassed: false,
+            solo: None,
+            flat: false,
             status: "enter: open   b: bypass   tab: switch screen   ?: help   q: quit".into(),
         }
     }
@@ -96,9 +101,7 @@ impl App {
         loop {
             if self.preview_due.is_some_and(|t| Instant::now() >= t) {
                 self.preview_due = None;
-                if let Some(o) = &self.open {
-                    self.report(easyeffects::load(&o.draft), "previewing (unsaved)");
-                }
+                self.apply("previewing (unsaved)");
             }
             terminal.draw(|f| self.draw(f))?;
 
@@ -112,8 +115,8 @@ impl App {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            let ctrl_c =
-                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let ctrl_c = ctrl && key.code == KeyCode::Char('c');
 
             if let Some(after) = self.confirm.take() {
                 match key.code {
@@ -143,13 +146,21 @@ impl App {
             }
             match key.code {
                 KeyCode::Char('?') => self.show_help = !self.show_help,
+                KeyCode::Char('s') if ctrl => {
+                    self.save();
+                }
                 KeyCode::Char('b') => {
-                    let on = !self.bypassed;
-                    let result = easyeffects::set_bypass(on);
-                    if result.is_ok() {
-                        self.bypassed = on;
+                    self.bypassed = !self.bypassed;
+                    let msg = if self.bypassed {
+                        "bypass ON (filters off, preamp kept)"
+                    } else {
+                        "bypass off"
+                    };
+                    if self.flat || self.open.is_none() {
+                        self.status = msg.into();
+                    } else {
+                        self.apply(msg);
                     }
-                    self.report(result, if on { "bypass ON" } else { "bypass off" });
                 }
                 KeyCode::Tab => {
                     self.screen = match self.screen {
@@ -182,19 +193,30 @@ impl App {
         };
     }
 
+    /// Send what should be heard (the draft with bypass and solo applied) to EasyEffects.
+    fn apply(&mut self, ok: &str) {
+        let Some(o) = &self.open else {
+            return;
+        };
+        let result = easyeffects::load(&effective(&o.draft, self.bypassed, self.solo));
+        self.flat = false;
+        self.report(result, ok);
+    }
+
     fn open_file(&mut self, path: PathBuf) {
         match load_peq_file(&path) {
             Ok(preset) => {
-                let result = easyeffects::load(&preset);
-                self.report(result, &format!("loaded {}", preset.name));
+                let ok = format!("loaded {}", preset.name);
                 self.open = Some(Open {
                     path,
                     saved: preset.clone(),
                     draft: preset,
                 });
                 self.row = 0;
+                self.solo = None;
                 self.preview_due = None;
                 self.screen = Screen::Eq;
+                self.apply(&ok);
             }
             Err(e) => self.status = format!("cannot open: {e:#}"),
         }
@@ -222,12 +244,10 @@ impl App {
     fn discard(&mut self) {
         if let Some(o) = &mut self.open {
             o.draft = o.saved.clone();
+            self.row = self.row.min(o.draft.bands.len());
+            self.solo = None;
             self.preview_due = None;
-            let result = easyeffects::load(&o.saved);
-            self.report(result, "discarded changes");
-            self.row = self
-                .row
-                .min(self.open.as_ref().map_or(0, |o| o.draft.bands.len()));
+            self.apply("discarded changes");
         }
     }
 
@@ -245,7 +265,15 @@ impl App {
                 if node.is_dir {
                     let open = self.tree.expanded.contains(&node.path);
                     self.tree.set_expanded(!open || code != KeyCode::Enter);
+                } else if node.path.as_os_str().is_empty() {
+                    self.flat = true;
+                    self.preview_due = None;
+                    let result = easyeffects::load(&Preset::new("Flat"));
+                    self.report(result, "playing Flat");
                 } else if self.open.as_ref().is_some_and(|o| o.path == node.path) {
+                    if self.flat {
+                        self.apply("back to the curve");
+                    }
                     self.screen = Screen::Eq;
                 } else if self.leave(After::Open(node.path.clone())) {
                     self.open_file(node.path);
@@ -260,7 +288,7 @@ impl App {
             return;
         };
         let rows = 1 + o.draft.bands.len();
-        let before = o.draft.clone();
+        let before = effective(&o.draft, self.bypassed, self.solo);
         match code {
             KeyCode::Esc => self.screen = Screen::Tree,
             KeyCode::Up | KeyCode::Char('k') => self.row = (self.row + rows - 1) % rows,
@@ -296,18 +324,34 @@ impl App {
                     },
                 );
                 self.row = at + 1;
+                if let Some(s) = &mut self.solo {
+                    if *s >= at {
+                        *s += 1;
+                    }
+                }
             }
             KeyCode::Char('x') if self.row > 0 => {
-                o.draft.bands.remove(self.row - 1);
+                let i = self.row - 1;
+                o.draft.bands.remove(i);
                 self.row -= 1;
+                self.solo = match self.solo {
+                    Some(s) if s == i => None,
+                    Some(s) if s > i => Some(s - 1),
+                    s => s,
+                };
             }
-            KeyCode::Char('s') => {
-                self.save();
+            KeyCode::Char('s') if self.row > 0 => {
+                let i = self.row - 1;
+                self.solo = if self.solo == Some(i) { None } else { Some(i) };
             }
             KeyCode::Char('u') => self.discard(),
             _ => {}
         }
-        if self.open.as_ref().is_some_and(|o| o.draft != before) {
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| effective(&o.draft, self.bypassed, self.solo) != before)
+        {
             self.preview_due = Some(Instant::now() + PREVIEW_DEBOUNCE);
         }
     }
@@ -360,23 +404,23 @@ impl App {
         }
         let status = if self.show_help {
             match self.screen {
-                Screen::Tree => "j/k: move  l/enter: open/expand  h: collapse  b: bypass  tab: EQ screen  q: quit",
-                Screen::Eq => "j/k: row  h/l: field  +/-: fine  [/]: coarse  t: type  space: on/off  n: add  x: delete  b: bypass  s: save  u: discard  esc/tab: tree  q: quit",
+                Screen::Tree => "j/k: move  l/enter: open/expand  h: collapse  b: bypass  ctrl+s: save  tab: EQ screen  q: quit",
+                Screen::Eq => "j/k: row  h/l: field  +/-: fine  [/]: coarse  t: type  space: on/off  s: solo  n: add  x: delete  b: bypass  ctrl+s: save  u: discard  esc/tab: tree  q: quit",
             }
         } else {
             self.status.as_str()
         };
-        let mut line = vec![Span::raw(status)];
-        if self.bypassed {
-            line.insert(
-                0,
-                Span::styled(
-                    " BYPASS ",
+        let mut line = Vec::new();
+        for (on, badge) in [(self.flat, " FLAT "), (self.bypassed, " BYPASS ")] {
+            if on {
+                line.push(Span::styled(
+                    badge,
                     Style::default().fg(Color::Black).bg(Color::Yellow),
-                ),
-            );
-            line.insert(1, Span::raw(" "));
+                ));
+                line.push(Span::raw(" "));
+            }
         }
+        line.push(Span::raw(status));
         f.render_widget(Paragraph::new(Line::from(line)), chunks[1]);
     }
 
@@ -387,7 +431,11 @@ impl App {
             .visible
             .iter()
             .map(|n| {
-                let name = n.path.file_name().unwrap_or_default().to_string_lossy();
+                let flat = n.path.as_os_str().is_empty();
+                let name = match n.path.file_name() {
+                    _ if flat => "Flat".into(),
+                    name => name.unwrap_or_default().to_string_lossy(),
+                };
                 let icon = match (n.is_dir, self.tree.expanded.contains(&n.path)) {
                     (true, true) => "▾ ",
                     (true, false) => "▸ ",
@@ -406,10 +454,22 @@ impl App {
                 if !n.ok {
                     spans.push(Span::styled(" !", Style::default().fg(Color::Yellow)));
                 }
-                if open_path == Some(&n.path) {
-                    let mark = if self.dirty() { " ● *" } else { " ●" };
-                    spans.push(Span::styled(mark, Style::default().fg(Color::Green)));
-                }
+                // ● is what is playing; ○ is the open curve while Flat plays.
+                let mark = match (flat, open_path == Some(&n.path)) {
+                    (true, _) if self.flat => " ●",
+                    (false, true) if self.flat => " ○",
+                    (false, true) => " ●",
+                    _ => "",
+                };
+                let dirty = if !flat && open_path == Some(&n.path) && self.dirty() {
+                    " *"
+                } else {
+                    ""
+                };
+                spans.push(Span::styled(
+                    format!("{mark}{dirty}"),
+                    Style::default().fg(Color::Green),
+                ));
                 ListItem::new(Line::from(spans))
             })
             .collect();
@@ -440,7 +500,8 @@ impl App {
         let curve = chunks[0];
         let width = curve.width.saturating_sub(2).max(10) as usize;
         let height = curve.height.saturating_sub(2).max(3) as usize;
-        let lines = crate::render::plot(|hz| preset_response_db(&o.draft, hz, FS), width, height);
+        let live = effective(&o.draft, self.bypassed, self.solo);
+        let lines = crate::render::plot(|hz| preset_response_db(&live, hz, FS), width, height);
         let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
         f.render_widget(
             Paragraph::new(text)
@@ -450,13 +511,13 @@ impl App {
         );
 
         let rows: Vec<Row> = std::iter::once(self.preamp_row(o))
-            .chain((0..o.draft.bands.len()).map(|i| self.band_row(o, i)))
+            .chain((0..o.draft.bands.len()).map(|i| self.band_row(o, i, live.bands[i].enabled)))
             .collect();
         let selected = self.row;
         let table = Table::new(
             rows,
             [
-                Constraint::Length(4),
+                Constraint::Length(6),
                 Constraint::Length(11),
                 Constraint::Length(10),
                 Constraint::Length(10),
@@ -486,7 +547,7 @@ impl App {
         ])
     }
 
-    fn band_row(&self, o: &Open, i: usize) -> Row<'static> {
+    fn band_row(&self, o: &Open, i: usize, active: bool) -> Row<'static> {
         let b = &o.draft.bands[i];
         let sel = self.row == i + 1;
         let kind = match b.kind {
@@ -495,7 +556,11 @@ impl App {
             BandType::Highshelf => "highshelf",
         };
         let row = Row::new(vec![
-            Cell::from(if b.enabled { "[x]" } else { "[ ]" }),
+            Cell::from(format!(
+                "{}{}",
+                if b.enabled { "[x]" } else { "[ ]" },
+                if self.solo == Some(i) { " S" } else { "" }
+            )),
             Cell::from(label(kind, sel)),
             Cell::from(Span::styled(
                 format!("{:.0}", b.freq),
@@ -510,12 +575,23 @@ impl App {
                 field_style(sel && self.field == Field::Q),
             )),
         ]);
-        if b.enabled {
+        if active {
             row
         } else {
             row.style(Style::default().fg(Color::DarkGray))
         }
     }
+}
+
+/// What EasyEffects should play: the draft with bypass and solo applied. Bypass turns
+/// every filter off but keeps the preamp, so levels stay comparable; soloing an OFF
+/// band leaves only the preamp.
+fn effective(draft: &Preset, bypassed: bool, solo: Option<usize>) -> Preset {
+    let mut p = draft.clone();
+    for (i, b) in p.bands.iter_mut().enumerate() {
+        b.enabled &= !bypassed && solo.is_none_or(|s| s == i);
+    }
+    p
 }
 
 fn round_to(x: f64, step: f64) -> f64 {
@@ -684,5 +760,32 @@ mod terminal_tests {
         }));
         assert!(result.is_err());
         assert_eq!(calls.borrow().last(), Some(&"disable_raw"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_applies_bypass_and_solo_but_keeps_preamp() {
+        let mut p = Preset::new("t");
+        p.preamp_db = -4.0;
+        for enabled in [true, false, true] {
+            p.bands.push(Band {
+                kind: BandType::Peaking,
+                freq: 1000.0,
+                gain: 2.0,
+                q: 1.0,
+                enabled,
+            });
+        }
+        let on = |p: Preset| p.bands.iter().map(|b| b.enabled).collect::<Vec<_>>();
+        assert_eq!(on(effective(&p, false, None)), [true, false, true]);
+        assert_eq!(on(effective(&p, false, Some(2))), [false, false, true]);
+        assert_eq!(on(effective(&p, false, Some(1))), [false, false, false]);
+        let bypassed = effective(&p, true, None);
+        assert_eq!(bypassed.preamp_db, -4.0);
+        assert_eq!(on(bypassed), [false, false, false]);
     }
 }
