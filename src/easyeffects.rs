@@ -70,15 +70,6 @@ pub fn load(preset: &Preset) -> Result<()> {
     ee(&["-l", PRESET_NAME]).map(drop)
 }
 
-/// Whether EasyEffects' global bypass is on.
-pub fn bypassed() -> Result<bool> {
-    Ok(ee(&["-b", "3"])?.trim() == "1")
-}
-
-pub fn set_bypass(on: bool) -> Result<()> {
-    ee(&["-b", if on { "1" } else { "2" }]).map(drop)
-}
-
 fn ee(args: &[&str]) -> Result<String> {
     let out = Command::new("easyeffects")
         .args(args)

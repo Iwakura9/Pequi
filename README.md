@@ -57,9 +57,10 @@ generic tonal tilts, not tuned to any particular headphone.
 
 | Where | Key | Action |
 |---|---|---|
-| anywhere | `b` | toggle EasyEffects global bypass |
+| anywhere | `b` | bypass: filters off, preamp kept (levels stay comparable) |
+| anywhere | `Ctrl+s` | save |
 | tree | `j` / `k` | move |
-| tree | `l` / `Enter` | expand folder or open curve |
+| tree | `l` / `Enter` | expand folder or open curve (`Flat`, at the top, plays no filters at 0 dB preamp) |
 | tree | `h` | collapse |
 | tree | `Tab` | go to the EQ screen |
 | tree | `q` | quit |
@@ -69,8 +70,9 @@ generic tonal tilts, not tuned to any particular headphone.
 | EQ | `[` / `]` | coarse adjust |
 | EQ | `t` | change band type |
 | EQ | `space` | enable / disable band |
+| EQ | `s` | solo band (not saved) |
 | EQ | `n` / `x` | add / delete band |
-| EQ | `s` / `u` | save / discard |
+| EQ | `u` | discard |
 | EQ | `Esc` / `Tab` | back to the tree |
 | EQ | `?` | help |
 
