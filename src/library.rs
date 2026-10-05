@@ -34,6 +34,13 @@ impl Tree {
     /// Rebuild the flattened visible list from disk and the expanded set.
     pub fn refresh(&mut self) {
         self.visible.clear();
+        // An empty path is the built-in Flat entry: no filters, preamp at zero.
+        self.visible.push(Node {
+            path: PathBuf::new(),
+            depth: 0,
+            is_dir: false,
+            ok: true,
+        });
         let root = self.root.clone();
         self.walk(&root, 0);
         self.cursor = self.cursor.min(self.visible.len().saturating_sub(1));
@@ -126,19 +133,20 @@ mod tests {
         let names: Vec<_> = tree
             .visible
             .iter()
-            .map(|n| n.path.file_name().unwrap().to_string_lossy().into_owned())
+            .map(|n| n.path.to_string_lossy().replace(&format!("{}/", root.display()), ""))
             .collect();
-        assert_eq!(names, ["B", "a.txt", "bad"]);
-        assert!(tree.visible[1].ok && !tree.visible[2].ok);
+        assert_eq!(names, ["", "B", "a.txt", "bad"]);
+        assert!(tree.visible[2].ok && !tree.visible[3].ok);
 
+        tree.move_by(1);
         tree.set_expanded(true);
-        assert_eq!(tree.visible.len(), 4);
-        assert_eq!(tree.visible[1].depth, 1);
+        assert_eq!(tree.visible.len(), 5);
+        assert_eq!(tree.visible[2].depth, 1);
 
         tree.move_by(1);
         tree.set_expanded(false); // on child file: collapse parent
-        assert_eq!(tree.cursor, 0);
-        assert_eq!(tree.visible.len(), 3);
+        assert_eq!(tree.cursor, 1);
+        assert_eq!(tree.visible.len(), 4);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
