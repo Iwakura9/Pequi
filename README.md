@@ -58,25 +58,22 @@ generic tonal tilts, not tuned to any particular headphone.
 | Where | Key | Action |
 |---|---|---|
 | anywhere | `b` | bypass: filters off, preamp kept (levels stay comparable) |
-| anywhere | `Ctrl+s` | save |
 | tree | `j` / `k` | move |
-| tree | `l` / `Enter` | expand folder or open curve (`Flat`, at the top, plays no filters at 0 dB preamp) |
-| tree | `h` | collapse |
+| tree | `Enter` | expand folder or open curve (`Flat`, at the top, plays no filters at 0 dB preamp) |
 | tree | `Tab` | go to the EQ screen |
 | tree | `q` | quit |
-| EQ | `j` / `k` | select band |
-| EQ | `h` / `l` | select field |
-| EQ | `+` / `-` | fine adjust |
-| EQ | `[` / `]` | coarse adjust |
-| EQ | `t` | change band type |
+| EQ | `+` / `-` | adjust the selected value |
+| EQ | `Enter` | type a value, or pick the band type from a list |
 | EQ | `space` | enable / disable band |
 | EQ | `s` | solo band (not saved) |
-| EQ | `n` / `x` | add / delete band |
-| EQ | `u` | discard |
+| EQ | `n` / `d` | new / delete band |
+| EQ | `Ctrl+s` | save |
+| EQ | `u` | undo (back to the saved curve) |
 | EQ | `Esc` / `Tab` | back to the tree |
 | EQ | `?` | help |
 
-Leaving a curve with unsaved edits asks whether to save (`s`) or discard (`d`).
+Arrow keys move around both screens. Opening another curve or quitting drops unsaved
+edits.
 
 ## Development
 

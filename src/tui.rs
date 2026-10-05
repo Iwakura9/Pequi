@@ -13,10 +13,12 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table,
+};
 use std::io::stdout;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -38,17 +40,25 @@ enum Screen {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Field {
+    Type,
     Freq,
     Gain,
     Q,
 }
 
-/// What to do once an unsaved draft has been saved or discarded.
-#[derive(Clone, PartialEq)]
-enum After {
-    Open(PathBuf),
-    Quit,
+/// An Enter-started edit of the selected cell.
+enum Edit {
+    /// Type dropdown, with the highlighted entry of `KINDS`.
+    Type(usize),
+    /// Number being typed.
+    Number(String),
 }
+
+const KINDS: [(BandType, &str); 3] = [
+    (BandType::Peaking, "peaking"),
+    (BandType::Lowshelf, "lowshelf"),
+    (BandType::Highshelf, "highshelf"),
+];
 
 struct Open {
     path: PathBuf,
@@ -62,8 +72,8 @@ struct App {
     open: Option<Open>,
     row: usize, // 0 = preamp, 1.. = bands[row-1]
     field: Field,
+    editing: Option<Edit>,
     preview_due: Option<Instant>,
-    confirm: Option<After>,
     show_help: bool,
     bypassed: bool,
     solo: Option<usize>,
@@ -80,13 +90,13 @@ impl App {
             open: None,
             row: 0,
             field: Field::Gain,
+            editing: None,
             preview_due: None,
-            confirm: None,
             show_help: false,
             bypassed: false,
             solo: None,
             flat: false,
-            status: "enter: open   b: bypass   tab: switch screen   ?: help   q: quit".into(),
+            status: String::new(),
         }
     }
 
@@ -118,37 +128,21 @@ impl App {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let ctrl_c = ctrl && key.code == KeyCode::Char('c');
 
-            if let Some(after) = self.confirm.take() {
-                match key.code {
-                    KeyCode::Char('s') => {
-                        if !self.save() {
-                            continue;
-                        }
-                    }
-                    KeyCode::Char('d') => self.discard(),
-                    _ => {
-                        self.status = "cancelled".into();
-                        continue;
-                    }
-                }
-                match after {
-                    After::Quit => return Ok(()),
-                    After::Open(path) => self.open_file(path),
-                }
+            // While editing a cell, keys belong to the edit (typing must not trigger shortcuts).
+            if self.editing.is_some() && !ctrl_c {
+                self.eq_key(key.code);
                 continue;
             }
-
             if ctrl_c || key.code == KeyCode::Char('q') {
-                if self.leave(After::Quit) {
-                    return Ok(());
+                // Unsaved edits are dropped; put the saved curve back unless Flat plays.
+                if self.dirty() && !self.flat {
+                    self.discard();
                 }
-                continue;
+                return Ok(());
             }
             match key.code {
                 KeyCode::Char('?') => self.show_help = !self.show_help,
-                KeyCode::Char('s') if ctrl => {
-                    self.save();
-                }
+                KeyCode::Char('s') if ctrl && self.screen == Screen::Eq => self.save(),
                 KeyCode::Char('b') => {
                     self.bypassed = !self.bypassed;
                     let msg = if self.bypassed {
@@ -174,16 +168,6 @@ impl App {
                 },
             }
         }
-    }
-
-    /// Ask before leaving a dirty draft; returns true when it is fine to proceed now.
-    fn leave(&mut self, after: After) -> bool {
-        if !self.dirty() {
-            return true;
-        }
-        self.confirm = Some(after);
-        self.status = "unsaved changes - s: save, d: discard, other key: cancel".into();
-        false
     }
 
     fn report(&mut self, result: Result<()>, ok: &str) {
@@ -222,21 +206,17 @@ impl App {
         }
     }
 
-    fn save(&mut self) -> bool {
+    fn save(&mut self) {
         let Some(o) = &mut self.open else {
-            return false;
+            return;
         };
         match write_atomic(&o.path, &to_peq(&o.draft)) {
             Ok(()) => {
                 o.saved = o.draft.clone();
                 self.status = format!("saved {}", o.path.display());
                 self.tree.refresh();
-                true
             }
-            Err(e) => {
-                self.status = format!("save failed: {e:#}");
-                false
-            }
+            Err(e) => self.status = format!("save failed: {e:#}"),
         }
     }
 
@@ -257,8 +237,8 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.tree.move_by(1),
             KeyCode::PageUp => self.tree.move_by(-10),
             KeyCode::PageDown => self.tree.move_by(10),
-            KeyCode::Left | KeyCode::Char('h') => self.tree.set_expanded(false),
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+            KeyCode::Left => self.tree.set_expanded(false),
+            KeyCode::Right | KeyCode::Enter => {
                 let Some(node) = self.tree.selected().cloned() else {
                     return;
                 };
@@ -275,7 +255,7 @@ impl App {
                         self.apply("back to the curve");
                     }
                     self.screen = Screen::Eq;
-                } else if self.leave(After::Open(node.path.clone())) {
+                } else {
                     self.open_file(node.path);
                 }
             }
@@ -289,63 +269,66 @@ impl App {
         };
         let rows = 1 + o.draft.bands.len();
         let before = effective(&o.draft, self.bypassed, self.solo);
-        match code {
-            KeyCode::Esc => self.screen = Screen::Tree,
-            KeyCode::Up | KeyCode::Char('k') => self.row = (self.row + rows - 1) % rows,
-            KeyCode::Down | KeyCode::Char('j') => self.row = (self.row + 1) % rows,
-            KeyCode::Left | KeyCode::Char('h') => self.next_field(false),
-            KeyCode::Right | KeyCode::Char('l') => self.next_field(true),
-            KeyCode::Char('+') | KeyCode::Char('=') => self.adjust(false, true),
-            KeyCode::Char('-') | KeyCode::Char('_') => self.adjust(false, false),
-            KeyCode::Char(']') => self.adjust(true, true),
-            KeyCode::Char('[') => self.adjust(true, false),
-            KeyCode::Char('t') if self.row > 0 => {
-                let b = &mut o.draft.bands[self.row - 1];
-                b.kind = match b.kind {
-                    BandType::Peaking => BandType::Lowshelf,
-                    BandType::Lowshelf => BandType::Highshelf,
-                    BandType::Highshelf => BandType::Peaking,
-                };
-            }
-            KeyCode::Char(' ') if self.row > 0 => {
-                let b = &mut o.draft.bands[self.row - 1];
-                b.enabled = !b.enabled;
-            }
-            KeyCode::Char('n') if o.draft.bands.len() < v::MAX_BANDS => {
-                let at = self.row; // insert after the selected row
-                o.draft.bands.insert(
-                    at,
-                    Band {
-                        kind: BandType::Peaking,
-                        freq: 1000.0,
-                        gain: 0.0,
-                        q: 1.0,
-                        enabled: true,
-                    },
-                );
-                self.row = at + 1;
-                if let Some(s) = &mut self.solo {
-                    if *s >= at {
-                        *s += 1;
+        if let Some(edit) = self.editing.take() {
+            self.edit_key(edit, code);
+        } else {
+            match code {
+                KeyCode::Esc => self.screen = Screen::Tree,
+                KeyCode::Enter => {
+                    self.editing = Some(match (self.row, self.field) {
+                        (r, Field::Type) if r > 0 => {
+                            let kind = o.draft.bands[r - 1].kind;
+                            Edit::Type(KINDS.iter().position(|k| k.0 == kind).unwrap_or(0))
+                        }
+                        _ => Edit::Number(String::new()),
+                    })
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.row = (self.row + rows - 1) % rows,
+                KeyCode::Down | KeyCode::Char('j') => self.row = (self.row + 1) % rows,
+                KeyCode::Left | KeyCode::Char('h') => self.next_field(false),
+                KeyCode::Right | KeyCode::Char('l') => self.next_field(true),
+                KeyCode::Char('+') | KeyCode::Char('=') => self.adjust(true),
+                KeyCode::Char('-') | KeyCode::Char('_') => self.adjust(false),
+                KeyCode::Char(' ') if self.row > 0 => {
+                    let b = &mut o.draft.bands[self.row - 1];
+                    b.enabled = !b.enabled;
+                }
+                KeyCode::Char('n') if o.draft.bands.len() < v::MAX_BANDS => {
+                    let at = self.row; // insert after the selected row
+                    o.draft.bands.insert(
+                        at,
+                        Band {
+                            kind: BandType::Peaking,
+                            freq: 1000.0,
+                            gain: 0.0,
+                            q: 1.0,
+                            enabled: true,
+                        },
+                    );
+                    self.row = at + 1;
+                    if let Some(s) = &mut self.solo {
+                        if *s >= at {
+                            *s += 1;
+                        }
                     }
                 }
+                KeyCode::Char('d') if self.row > 0 => {
+                    let i = self.row - 1;
+                    o.draft.bands.remove(i);
+                    self.row -= 1;
+                    self.solo = match self.solo {
+                        Some(s) if s == i => None,
+                        Some(s) if s > i => Some(s - 1),
+                        s => s,
+                    };
+                }
+                KeyCode::Char('s') if self.row > 0 => {
+                    let i = self.row - 1;
+                    self.solo = if self.solo == Some(i) { None } else { Some(i) };
+                }
+                KeyCode::Char('u') => self.discard(),
+                _ => {}
             }
-            KeyCode::Char('x') if self.row > 0 => {
-                let i = self.row - 1;
-                o.draft.bands.remove(i);
-                self.row -= 1;
-                self.solo = match self.solo {
-                    Some(s) if s == i => None,
-                    Some(s) if s > i => Some(s - 1),
-                    s => s,
-                };
-            }
-            KeyCode::Char('s') if self.row > 0 => {
-                let i = self.row - 1;
-                self.solo = if self.solo == Some(i) { None } else { Some(i) };
-            }
-            KeyCode::Char('u') => self.discard(),
-            _ => {}
         }
         if self
             .open
@@ -356,41 +339,69 @@ impl App {
         }
     }
 
+    fn edit_key(&mut self, edit: Edit, code: KeyCode) {
+        let Some(o) = &mut self.open else {
+            return;
+        };
+        let n = KINDS.len();
+        self.editing = match (edit, code) {
+            (_, KeyCode::Esc) => None,
+            (Edit::Type(i), KeyCode::Up | KeyCode::Char('k')) => Some(Edit::Type((i + n - 1) % n)),
+            (Edit::Type(i), KeyCode::Down | KeyCode::Char('j')) => Some(Edit::Type((i + 1) % n)),
+            (Edit::Type(i), KeyCode::Enter) => {
+                o.draft.bands[self.row - 1].kind = KINDS[i].0;
+                None
+            }
+            (Edit::Number(s), KeyCode::Enter) => {
+                match s.parse::<f64>() {
+                    Ok(x) => set_value(&mut o.draft, self.row, self.field, x),
+                    Err(_) if s.is_empty() => {}
+                    Err(_) => self.status = format!("invalid number: {s}"),
+                }
+                None
+            }
+            (Edit::Number(mut s), KeyCode::Backspace) => {
+                s.pop();
+                Some(Edit::Number(s))
+            }
+            (Edit::Number(mut s), KeyCode::Char(c))
+                if c.is_ascii_digit() || c == '.' || c == '-' =>
+            {
+                s.push(c);
+                Some(Edit::Number(s))
+            }
+            (edit, _) => Some(edit),
+        };
+    }
+
+    /// The text of a value cell, or the number being typed when `here` is the cell in edit.
+    fn shown(&self, here: bool, value: String) -> String {
+        match &self.editing {
+            Some(Edit::Number(s)) if here => format!("{s}_"),
+            _ => value,
+        }
+    }
+
     fn next_field(&mut self, forward: bool) {
-        let order = [Field::Freq, Field::Gain, Field::Q];
+        let order = [Field::Type, Field::Freq, Field::Gain, Field::Q];
         let idx = order.iter().position(|f| *f == self.field).unwrap_or(0);
         let step = if forward { 1 } else { order.len() - 1 };
         self.field = order[(idx + step) % order.len()];
     }
 
-    fn adjust(&mut self, coarse: bool, up: bool) {
+    fn adjust(&mut self, up: bool) {
         let Some(o) = &mut self.open else {
             return;
         };
         let sign = if up { 1.0 } else { -1.0 };
-        if self.row == 0 {
-            let step = if coarse { 1.0 } else { 0.1 };
-            o.draft.preamp_db = round_to(o.draft.preamp_db + sign * step, 0.1)
-                .clamp(v::MIN_PREAMP_DB, v::MAX_PREAMP_DB);
-            return;
-        }
-        let band = &mut o.draft.bands[self.row - 1];
-        match self.field {
-            Field::Freq => {
-                let mult: f64 = if coarse { 1.2 } else { 1.02 };
-                let f = band.freq * if up { mult } else { 1.0 / mult };
-                band.freq = f.round().clamp(v::MIN_FREQUENCY_HZ, v::MAX_FREQUENCY_HZ);
-            }
-            Field::Gain => {
-                let step = if coarse { 1.0 } else { 0.1 };
-                band.gain =
-                    round_to(band.gain + sign * step, 0.1).clamp(v::MIN_GAIN_DB, v::MAX_GAIN_DB);
-            }
-            Field::Q => {
-                let step = if coarse { 0.1 } else { 0.01 };
-                band.q = round_to(band.q + sign * step, 0.001).clamp(v::MIN_Q, v::MAX_Q);
-            }
-        }
+        let x = match (self.row, self.field) {
+            (0, _) => o.draft.preamp_db + sign * 0.1,
+            (_, Field::Type) => return,
+            (r, Field::Freq) => o.draft.bands[r - 1].freq * if up { 1.02 } else { 1.0 / 1.02 },
+            (r, Field::Gain) => o.draft.bands[r - 1].gain + sign * 0.1,
+            (r, Field::Q) => o.draft.bands[r - 1].q + sign * 0.01,
+        };
+        set_value(&mut o.draft, self.row, self.field, x);
     }
 
     fn draw(&self, f: &mut ratatui::Frame) {
@@ -402,14 +413,6 @@ impl App {
             (Screen::Eq, Some(o)) => self.draw_eq(f, o, chunks[0]),
             _ => self.draw_tree(f, chunks[0]),
         }
-        let status = if self.show_help {
-            match self.screen {
-                Screen::Tree => "j/k: move  l/enter: open/expand  h: collapse  b: bypass  ctrl+s: save  tab: EQ screen  q: quit",
-                Screen::Eq => "j/k: row  h/l: field  +/-: fine  [/]: coarse  t: type  space: on/off  s: solo  n: add  x: delete  b: bypass  ctrl+s: save  u: discard  esc/tab: tree  q: quit",
-            }
-        } else {
-            self.status.as_str()
-        };
         let mut line = Vec::new();
         for (on, badge) in [(self.flat, " FLAT "), (self.bypassed, " BYPASS ")] {
             if on {
@@ -420,8 +423,32 @@ impl App {
                 line.push(Span::raw(" "));
             }
         }
-        line.push(Span::raw(status));
-        f.render_widget(Paragraph::new(Line::from(line)), chunks[1]);
+        if !(self.show_help && self.screen == Screen::Eq) {
+            line.push(Span::raw(self.status.as_str()));
+            f.render_widget(Paragraph::new(Line::from(line)), chunks[1]);
+            return;
+        }
+        // Help: badges on the left, then the words spread evenly over the rest of the
+        // line. Each word's first letter is its key, shown highlighted.
+        let words = ["solo", "new", "delete", "bypass", "undo", "quit"];
+        let badges = Line::from(line);
+        let [left, right] = Layout::horizontal([
+            Constraint::Length(badges.width() as u16),
+            Constraint::Min(0),
+        ])
+        .areas(chunks[1]);
+        f.render_widget(badges, left);
+        let cells = Layout::horizontal(words.map(|w| Constraint::Length(w.len() as u16)))
+            .flex(Flex::SpaceBetween)
+            .split(right);
+        let key_style = Style::default()
+            .fg(Color::Rgb(190, 225, 255))
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        for (word, cell) in words.iter().zip(cells.iter()) {
+            let (key, rest) = word.split_at(1);
+            let hint = Line::from(vec![Span::styled(key, key_style), Span::raw(rest)]);
+            f.render_widget(hint, *cell);
+        }
     }
 
     fn draw_tree(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
@@ -531,6 +558,26 @@ impl App {
         .block(Block::default().borders(Borders::ALL).title(" bands "));
         let mut state = ratatui::widgets::TableState::default().with_selected(Some(selected));
         f.render_stateful_widget(table, chunks[1], &mut state);
+
+        if let Some(Edit::Type(i)) = self.editing {
+            // Drop the list just under the type cell (border + header above row 0, the
+            // "on" column), or above it when it would not fit.
+            let t = chunks[1];
+            let cell_y = t.y + 2 + (self.row - state.offset()) as u16;
+            let (w, h) = (13, KINDS.len() as u16 + 2);
+            let y = if cell_y + 1 + h <= area.bottom() {
+                cell_y + 1
+            } else {
+                cell_y.saturating_sub(h)
+            };
+            let rect = Rect::new(t.x + 7, y, w, h).intersection(area);
+            let items: Vec<ListItem> = KINDS.iter().map(|k| ListItem::new(k.1)).collect();
+            let list = List::new(items)
+                .block(Block::default().borders(Borders::ALL))
+                .highlight_style(Style::default().fg(Color::Black).bg(Color::Yellow));
+            f.render_widget(Clear, rect);
+            f.render_stateful_widget(list, rect, &mut ListState::default().with_selected(Some(i)));
+        }
     }
 
     fn preamp_row(&self, o: &Open) -> Row<'static> {
@@ -540,7 +587,7 @@ impl App {
             Cell::from(label("preamp", sel)),
             Cell::from(""),
             Cell::from(Span::styled(
-                format!("{:.1}", o.draft.preamp_db),
+                self.shown(sel, format!("{:.1}", o.draft.preamp_db)),
                 field_style(sel),
             )),
             Cell::from(""),
@@ -550,10 +597,10 @@ impl App {
     fn band_row(&self, o: &Open, i: usize, active: bool) -> Row<'static> {
         let b = &o.draft.bands[i];
         let sel = self.row == i + 1;
-        let kind = match b.kind {
-            BandType::Peaking => "peaking",
-            BandType::Lowshelf => "lowshelf",
-            BandType::Highshelf => "highshelf",
+        let kind = KINDS.iter().find(|k| k.0 == b.kind).map_or("", |k| k.1);
+        let cell = |field: Field, value: String| {
+            let here = sel && self.field == field;
+            Cell::from(Span::styled(self.shown(here, value), field_style(here)))
         };
         let row = Row::new(vec![
             Cell::from(format!(
@@ -561,19 +608,10 @@ impl App {
                 if b.enabled { "[x]" } else { "[ ]" },
                 if self.solo == Some(i) { " S" } else { "" }
             )),
-            Cell::from(label(kind, sel)),
-            Cell::from(Span::styled(
-                format!("{:.0}", b.freq),
-                field_style(sel && self.field == Field::Freq),
-            )),
-            Cell::from(Span::styled(
-                format!("{:.1}", b.gain),
-                field_style(sel && self.field == Field::Gain),
-            )),
-            Cell::from(Span::styled(
-                format!("{:.2}", b.q),
-                field_style(sel && self.field == Field::Q),
-            )),
+            cell(Field::Type, kind.into()),
+            cell(Field::Freq, format!("{:.0}", b.freq)),
+            cell(Field::Gain, format!("{:.1}", b.gain)),
+            cell(Field::Q, format!("{:.2}", b.q)),
         ]);
         if active {
             row
@@ -592,6 +630,21 @@ fn effective(draft: &Preset, bypassed: bool, solo: Option<usize>) -> Preset {
         b.enabled &= !bypassed && solo.is_none_or(|s| s == i);
     }
     p
+}
+
+/// Set a value on row 0 (preamp, field ignored) or a band, rounded and clamped to limits.
+fn set_value(p: &mut Preset, row: usize, field: Field, x: f64) {
+    if row == 0 {
+        p.preamp_db = round_to(x, 0.1).clamp(v::MIN_PREAMP_DB, v::MAX_PREAMP_DB);
+        return;
+    }
+    let band = &mut p.bands[row - 1];
+    match field {
+        Field::Type => {}
+        Field::Freq => band.freq = x.round().clamp(v::MIN_FREQUENCY_HZ, v::MAX_FREQUENCY_HZ),
+        Field::Gain => band.gain = round_to(x, 0.1).clamp(v::MIN_GAIN_DB, v::MAX_GAIN_DB),
+        Field::Q => band.q = round_to(x, 0.001).clamp(v::MIN_Q, v::MAX_Q),
+    }
 }
 
 fn round_to(x: f64, step: f64) -> f64 {
@@ -787,5 +840,27 @@ mod tests {
         let bypassed = effective(&p, true, None);
         assert_eq!(bypassed.preamp_db, -4.0);
         assert_eq!(on(bypassed), [false, false, false]);
+    }
+
+    #[test]
+    fn set_value_clamps_and_rounds() {
+        let mut p = Preset::new("t");
+        p.bands.push(Band {
+            kind: BandType::Peaking,
+            freq: 1000.0,
+            gain: 0.0,
+            q: 1.0,
+            enabled: true,
+        });
+        set_value(&mut p, 0, Field::Freq, -1000.0);
+        assert_eq!(p.preamp_db, v::MIN_PREAMP_DB);
+        set_value(&mut p, 1, Field::Freq, 1e9);
+        assert_eq!(p.bands[0].freq, v::MAX_FREQUENCY_HZ);
+        set_value(&mut p, 1, Field::Q, 0.70749);
+        assert!((p.bands[0].q - 0.707).abs() < 1e-9);
+        set_value(&mut p, 1, Field::Gain, 2.34);
+        assert!((p.bands[0].gain - 2.3).abs() < 1e-9);
+        set_value(&mut p, 1, Field::Type, 5.0);
+        assert_eq!(p.bands[0].freq, v::MAX_FREQUENCY_HZ);
     }
 }
