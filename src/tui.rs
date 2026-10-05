@@ -248,7 +248,7 @@ impl App {
                 } else if node.path.as_os_str().is_empty() {
                     self.flat = true;
                     self.preview_due = None;
-                    let result = easyeffects::load(&Preset::new("Flat"));
+                    let result = easyeffects::flat();
                     self.report(result, "playing Flat");
                 } else if self.open.as_ref().is_some_and(|o| o.path == node.path) {
                     if self.flat {

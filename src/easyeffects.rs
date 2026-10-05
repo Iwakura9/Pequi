@@ -61,13 +61,21 @@ fn output_dir() -> Result<PathBuf> {
     Ok(base.join("easyeffects/output"))
 }
 
-/// Write `preset` as the `pequi` EasyEffects preset and load it.
+/// Write `preset` as the `pequi` EasyEffects preset, load it and lift the global
+/// bypass that `flat` may have left on.
 pub fn load(preset: &Preset) -> Result<()> {
     let dir = output_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join(format!("{PRESET_NAME}.json"));
     crate::preset::write_atomic(&path, &serde_json::to_string_pretty(&preset_json(preset))?)?;
-    ee(&["-l", PRESET_NAME]).map(drop)
+    ee(&["-l", PRESET_NAME])?;
+    ee(&["-b", "2"]).map(drop)
+}
+
+/// Turn EasyEffects' global bypass on. The `pequi` preset is only the equalizer,
+/// so this plays flat without writing a preset (EE rejects `num-bands: 0`).
+pub fn flat() -> Result<()> {
+    ee(&["-b", "1"]).map(drop)
 }
 
 fn ee(args: &[&str]) -> Result<String> {
