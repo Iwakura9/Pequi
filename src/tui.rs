@@ -118,7 +118,7 @@ impl App {
             }
             match key.code {
                 KeyCode::Char('?') => self.show_help = !self.show_help,
-                KeyCode::Char('s') if ctrl => self.save(),
+                KeyCode::Char('s') if ctrl && self.screen == Screen::Eq => self.save(),
                 KeyCode::Char('b') => {
                     self.bypassed = !self.bypassed;
                     let msg = if self.bypassed {
@@ -213,8 +213,8 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.tree.move_by(1),
             KeyCode::PageUp => self.tree.move_by(-10),
             KeyCode::PageDown => self.tree.move_by(10),
-            KeyCode::Left | KeyCode::Char('h') => self.tree.set_expanded(false),
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+            KeyCode::Left => self.tree.set_expanded(false),
+            KeyCode::Right | KeyCode::Enter => {
                 let Some(node) = self.tree.selected().cloned() else {
                     return;
                 };
@@ -251,18 +251,8 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.row = (self.row + 1) % rows,
             KeyCode::Left | KeyCode::Char('h') => self.next_field(false),
             KeyCode::Right | KeyCode::Char('l') => self.next_field(true),
-            KeyCode::Char('+') | KeyCode::Char('=') => self.adjust(false, true),
-            KeyCode::Char('-') | KeyCode::Char('_') => self.adjust(false, false),
-            KeyCode::Char(']') => self.adjust(true, true),
-            KeyCode::Char('[') => self.adjust(true, false),
-            KeyCode::Char('t') if self.row > 0 => {
-                let b = &mut o.draft.bands[self.row - 1];
-                b.kind = match b.kind {
-                    BandType::Peaking => BandType::Lowshelf,
-                    BandType::Lowshelf => BandType::Highshelf,
-                    BandType::Highshelf => BandType::Peaking,
-                };
-            }
+            KeyCode::Char('+') | KeyCode::Char('=') => self.adjust(true),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.adjust(false),
             KeyCode::Char(' ') if self.row > 0 => {
                 let b = &mut o.draft.bands[self.row - 1];
                 b.enabled = !b.enabled;
@@ -319,34 +309,18 @@ impl App {
         self.field = order[(idx + step) % order.len()];
     }
 
-    fn adjust(&mut self, coarse: bool, up: bool) {
+    fn adjust(&mut self, up: bool) {
         let Some(o) = &mut self.open else {
             return;
         };
         let sign = if up { 1.0 } else { -1.0 };
-        if self.row == 0 {
-            let step = if coarse { 1.0 } else { 0.1 };
-            o.draft.preamp_db = round_to(o.draft.preamp_db + sign * step, 0.1)
-                .clamp(v::MIN_PREAMP_DB, v::MAX_PREAMP_DB);
-            return;
-        }
-        let band = &mut o.draft.bands[self.row - 1];
-        match self.field {
-            Field::Freq => {
-                let mult: f64 = if coarse { 1.2 } else { 1.02 };
-                let f = band.freq * if up { mult } else { 1.0 / mult };
-                band.freq = f.round().clamp(v::MIN_FREQUENCY_HZ, v::MAX_FREQUENCY_HZ);
-            }
-            Field::Gain => {
-                let step = if coarse { 1.0 } else { 0.1 };
-                band.gain =
-                    round_to(band.gain + sign * step, 0.1).clamp(v::MIN_GAIN_DB, v::MAX_GAIN_DB);
-            }
-            Field::Q => {
-                let step = if coarse { 0.1 } else { 0.01 };
-                band.q = round_to(band.q + sign * step, 0.001).clamp(v::MIN_Q, v::MAX_Q);
-            }
-        }
+        let x = match (self.row, self.field) {
+            (0, _) => o.draft.preamp_db + sign * 0.1,
+            (r, Field::Freq) => o.draft.bands[r - 1].freq * if up { 1.02 } else { 1.0 / 1.02 },
+            (r, Field::Gain) => o.draft.bands[r - 1].gain + sign * 0.1,
+            (r, Field::Q) => o.draft.bands[r - 1].q + sign * 0.01,
+        };
+        set_value(&mut o.draft, self.row, self.field, x);
     }
 
     fn draw(&self, f: &mut ratatui::Frame) {
@@ -360,8 +334,8 @@ impl App {
         }
         let status = if self.show_help {
             match self.screen {
-                Screen::Tree => "j/k: move  l/enter: open/expand  h: collapse  b: bypass  ctrl+s: save  tab: EQ screen  q: quit",
-                Screen::Eq => "j/k: row  h/l: field  +/-: fine  [/]: coarse  t: type  space: on/off  s: solo  n: add  x: delete  b: bypass  ctrl+s: save  u: discard  esc/tab: tree  q: quit",
+                Screen::Tree => "j/k: move  enter: open/expand  b: bypass  tab: EQ screen  q: quit",
+                Screen::Eq => "+/-: adjust  space: on/off  s: solo  n: add  x: delete  b: bypass  ctrl+s: save  u: discard  esc/tab: tree  q: quit",
             }
         } else {
             self.status.as_str()
@@ -548,6 +522,20 @@ fn effective(draft: &Preset, bypassed: bool, solo: Option<usize>) -> Preset {
         b.enabled &= !bypassed && solo.is_none_or(|s| s == i);
     }
     p
+}
+
+/// Set a value on row 0 (preamp, field ignored) or a band, rounded and clamped to limits.
+fn set_value(p: &mut Preset, row: usize, field: Field, x: f64) {
+    if row == 0 {
+        p.preamp_db = round_to(x, 0.1).clamp(v::MIN_PREAMP_DB, v::MAX_PREAMP_DB);
+        return;
+    }
+    let band = &mut p.bands[row - 1];
+    match field {
+        Field::Freq => band.freq = x.round().clamp(v::MIN_FREQUENCY_HZ, v::MAX_FREQUENCY_HZ),
+        Field::Gain => band.gain = round_to(x, 0.1).clamp(v::MIN_GAIN_DB, v::MAX_GAIN_DB),
+        Field::Q => band.q = round_to(x, 0.001).clamp(v::MIN_Q, v::MAX_Q),
+    }
 }
 
 fn round_to(x: f64, step: f64) -> f64 {
