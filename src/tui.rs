@@ -424,12 +424,15 @@ impl App {
             }
         }
         if self.show_help && self.screen == Screen::Eq {
-            // Each word's first letter is its key, shown in bold.
+            line.push(Span::raw("space: on/off  "));
+            // Each word's first letter is its key, shown highlighted.
             for word in ["solo", "new", "delete", "bypass", "undo", "quit"] {
                 let (key, rest) = word.split_at(1);
                 line.push(Span::styled(
                     key,
-                    Style::default().add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                 ));
                 line.push(Span::raw(format!("{rest}  ")));
             }
