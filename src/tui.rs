@@ -43,13 +43,6 @@ enum Field {
     Q,
 }
 
-/// What to do once an unsaved draft has been saved or discarded.
-#[derive(Clone, PartialEq)]
-enum After {
-    Open(PathBuf),
-    Quit,
-}
-
 struct Open {
     path: PathBuf,
     saved: Preset,
@@ -63,7 +56,6 @@ struct App {
     row: usize, // 0 = preamp, 1.. = bands[row-1]
     field: Field,
     preview_due: Option<Instant>,
-    confirm: Option<After>,
     show_help: bool,
     bypassed: bool,
     solo: Option<usize>,
@@ -81,7 +73,6 @@ impl App {
             row: 0,
             field: Field::Gain,
             preview_due: None,
-            confirm: None,
             show_help: false,
             bypassed: false,
             solo: None,
@@ -118,37 +109,16 @@ impl App {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let ctrl_c = ctrl && key.code == KeyCode::Char('c');
 
-            if let Some(after) = self.confirm.take() {
-                match key.code {
-                    KeyCode::Char('s') => {
-                        if !self.save() {
-                            continue;
-                        }
-                    }
-                    KeyCode::Char('d') => self.discard(),
-                    _ => {
-                        self.status = "cancelled".into();
-                        continue;
-                    }
-                }
-                match after {
-                    After::Quit => return Ok(()),
-                    After::Open(path) => self.open_file(path),
-                }
-                continue;
-            }
-
             if ctrl_c || key.code == KeyCode::Char('q') {
-                if self.leave(After::Quit) {
-                    return Ok(());
+                // Unsaved edits are dropped; put the saved curve back unless Flat plays.
+                if self.dirty() && !self.flat {
+                    self.discard();
                 }
-                continue;
+                return Ok(());
             }
             match key.code {
                 KeyCode::Char('?') => self.show_help = !self.show_help,
-                KeyCode::Char('s') if ctrl => {
-                    self.save();
-                }
+                KeyCode::Char('s') if ctrl => self.save(),
                 KeyCode::Char('b') => {
                     self.bypassed = !self.bypassed;
                     let msg = if self.bypassed {
@@ -174,16 +144,6 @@ impl App {
                 },
             }
         }
-    }
-
-    /// Ask before leaving a dirty draft; returns true when it is fine to proceed now.
-    fn leave(&mut self, after: After) -> bool {
-        if !self.dirty() {
-            return true;
-        }
-        self.confirm = Some(after);
-        self.status = "unsaved changes - s: save, d: discard, other key: cancel".into();
-        false
     }
 
     fn report(&mut self, result: Result<()>, ok: &str) {
@@ -222,21 +182,17 @@ impl App {
         }
     }
 
-    fn save(&mut self) -> bool {
+    fn save(&mut self) {
         let Some(o) = &mut self.open else {
-            return false;
+            return;
         };
         match write_atomic(&o.path, &to_peq(&o.draft)) {
             Ok(()) => {
                 o.saved = o.draft.clone();
                 self.status = format!("saved {}", o.path.display());
                 self.tree.refresh();
-                true
             }
-            Err(e) => {
-                self.status = format!("save failed: {e:#}");
-                false
-            }
+            Err(e) => self.status = format!("save failed: {e:#}"),
         }
     }
 
@@ -275,7 +231,7 @@ impl App {
                         self.apply("back to the curve");
                     }
                     self.screen = Screen::Eq;
-                } else if self.leave(After::Open(node.path.clone())) {
+                } else {
                     self.open_file(node.path);
                 }
             }
