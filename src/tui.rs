@@ -84,7 +84,7 @@ struct App {
 
 impl App {
     fn new(root: PathBuf) -> Self {
-        Self {
+        let mut app = Self {
             screen: Screen::Tree,
             tree: Tree::new(root),
             open: None,
@@ -97,6 +97,26 @@ impl App {
             solo: None,
             flat: false,
             status: String::new(),
+        };
+        app.restore();
+        app
+    }
+
+    /// Show what EasyEffects still plays from a previous run, without reloading it.
+    fn restore(&mut self) {
+        let Some((source, flat)) = easyeffects::playing() else {
+            return;
+        };
+        let Some(path) = self.tree.reveal(&source) else {
+            return;
+        };
+        if let Ok(preset) = load_peq_file(&path) {
+            self.open = Some(Open {
+                path,
+                saved: preset.clone(),
+                draft: preset,
+            });
+            self.flat = flat;
         }
     }
 
@@ -182,7 +202,7 @@ impl App {
         let Some(o) = &self.open else {
             return;
         };
-        let result = easyeffects::load(&effective(&o.draft, self.bypassed, self.solo));
+        let result = easyeffects::load(&effective(&o.draft, self.bypassed, self.solo), &o.path);
         self.flat = false;
         self.report(result, ok);
     }

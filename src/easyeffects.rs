@@ -5,7 +5,7 @@ use crate::dsp::BandType;
 use crate::preset::Preset;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Name of the scratch preset pequi overwrites on every apply/preview.
@@ -62,12 +62,16 @@ fn output_dir() -> Result<PathBuf> {
 }
 
 /// Write `preset` as the `pequi` EasyEffects preset, load it and lift the global
-/// bypass that `flat` may have left on.
-pub fn load(preset: &Preset) -> Result<()> {
+/// bypass that `flat` may have left on. `source` is kept in the JSON (EE ignores the
+/// extra key) so a later run knows which file is playing.
+pub fn load(preset: &Preset, source: &Path) -> Result<()> {
     let dir = output_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut json = preset_json(preset);
+    let source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    json["pequi"] = json!({ "source": source });
     let path = dir.join(format!("{PRESET_NAME}.json"));
-    crate::preset::write_atomic(&path, &serde_json::to_string_pretty(&preset_json(preset))?)?;
+    crate::preset::write_atomic(&path, &serde_json::to_string_pretty(&json)?)?;
     ee(&["-l", PRESET_NAME])?;
     ee(&["-b", "2"]).map(drop)
 }
@@ -76,6 +80,19 @@ pub fn load(preset: &Preset) -> Result<()> {
 /// so this plays flat without writing a preset (EE rejects `num-bands: 0`).
 pub fn flat() -> Result<()> {
     ee(&["-b", "1"]).map(drop)
+}
+
+/// The file pequi left playing and whether Flat (global bypass) is on, or `None` when
+/// EasyEffects is not on the `pequi` preset or the JSON has no source.
+pub fn playing() -> Option<(PathBuf, bool)> {
+    let path = output_dir().ok()?.join(format!("{PRESET_NAME}.json"));
+    let json: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let source = PathBuf::from(json["pequi"]["source"].as_str()?);
+    if ee(&["-a", "output"]).ok()?.trim() != PRESET_NAME {
+        return None;
+    }
+    let flat = ee(&["-b", "3"]).ok()?.trim() == "1";
+    Some((source, flat))
 }
 
 fn ee(args: &[&str]) -> Result<String> {
@@ -142,6 +159,6 @@ mod tests {
         let mut preset = Preset::new("t");
         preset.preamp_db = parsed.preamp_db;
         preset.bands = parsed.bands;
-        load(&preset).unwrap();
+        load(&preset, Path::new("t.txt")).unwrap();
     }
 }
