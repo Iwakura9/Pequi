@@ -84,7 +84,7 @@ struct App {
 
 impl App {
     fn new(root: PathBuf) -> Self {
-        Self {
+        let mut app = Self {
             screen: Screen::Tree,
             tree: Tree::new(root),
             open: None,
@@ -97,6 +97,30 @@ impl App {
             solo: None,
             flat: false,
             status: String::new(),
+        };
+        app.restore();
+        app
+    }
+
+    /// Show what EasyEffects still plays from a previous run, without reloading it.
+    fn restore(&mut self) {
+        let Some((source, flat)) = easyeffects::playing() else {
+            return;
+        };
+        // Flat is the tree's first node, where the cursor already starts.
+        if flat {
+            self.flat = true;
+            return;
+        }
+        let Some(path) = self.tree.reveal(&source) else {
+            return;
+        };
+        if let Ok(preset) = load_peq_file(&path) {
+            self.open = Some(Open {
+                path,
+                saved: preset.clone(),
+                draft: preset,
+            });
         }
     }
 
@@ -182,7 +206,7 @@ impl App {
         let Some(o) = &self.open else {
             return;
         };
-        let result = easyeffects::load(&effective(&o.draft, self.bypassed, self.solo));
+        let result = easyeffects::load(&effective(&o.draft, self.bypassed, self.solo), &o.path);
         self.flat = false;
         self.report(result, ok);
     }
@@ -481,13 +505,13 @@ impl App {
                 if !n.ok {
                     spans.push(Span::styled(" !", Style::default().fg(Color::Yellow)));
                 }
-                // ● is what is playing; ○ is the open curve while Flat plays.
-                let mark = match (flat, open_path == Some(&n.path)) {
-                    (true, _) if self.flat => " ●",
-                    (false, true) if self.flat => " ○",
-                    (false, true) => " ●",
-                    _ => "",
+                // ● is what is playing: Flat, or else the open curve.
+                let playing = if self.flat {
+                    flat
+                } else {
+                    !flat && open_path == Some(&n.path)
                 };
+                let mark = if playing { " ●" } else { "" };
                 let dirty = if !flat && open_path == Some(&n.path) && self.dirty() {
                     " *"
                 } else {

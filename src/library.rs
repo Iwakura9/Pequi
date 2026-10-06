@@ -86,6 +86,22 @@ impl Tree {
         }
     }
 
+    /// Expand the directories down to `file` (an absolute path) and put the cursor on
+    /// it. Returns the node's path as the tree spells it, or `None` if it isn't shown.
+    pub fn reveal(&mut self, file: &Path) -> Option<PathBuf> {
+        let root = std::fs::canonicalize(&self.root).ok()?;
+        let path = self.root.join(file.strip_prefix(root).ok()?);
+        self.expanded.extend(
+            path.ancestors()
+                .skip(1)
+                .take_while(|p| *p != self.root)
+                .map(PathBuf::from),
+        );
+        self.refresh();
+        self.cursor = self.visible.iter().position(|n| n.path == path)?;
+        Some(path)
+    }
+
     /// Expand/collapse the selected directory.
     pub fn set_expanded(&mut self, expand: bool) {
         let Some(node) = self.selected().cloned() else {
@@ -151,6 +167,12 @@ mod tests {
         tree.set_expanded(false); // on child file: collapse parent
         assert_eq!(tree.cursor, 1);
         assert_eq!(tree.visible.len(), 4);
+
+        let abs = std::fs::canonicalize(root.join("B/x.txt")).unwrap();
+        assert_eq!(tree.reveal(&abs), Some(root.join("B/x.txt")));
+        assert_eq!(tree.cursor, 2);
+        assert_eq!(tree.visible[2].depth, 1);
+        assert_eq!(tree.reveal(Path::new("/elsewhere/x.txt")), None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
