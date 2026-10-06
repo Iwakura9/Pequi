@@ -501,13 +501,13 @@ impl App {
                 if !n.ok {
                     spans.push(Span::styled(" !", Style::default().fg(Color::Yellow)));
                 }
-                // ● is what is playing; ○ is the open curve while Flat plays.
-                let mark = match (flat, open_path == Some(&n.path)) {
-                    (true, _) if self.flat => " ●",
-                    (false, true) if self.flat => " ○",
-                    (false, true) => " ●",
-                    _ => "",
+                // ● is what is playing: Flat, or else the open curve.
+                let playing = if self.flat {
+                    flat
+                } else {
+                    !flat && open_path == Some(&n.path)
                 };
+                let mark = if playing { " ●" } else { "" };
                 let dirty = if !flat && open_path == Some(&n.path) && self.dirty() {
                     " *"
                 } else {
