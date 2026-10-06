@@ -107,6 +107,11 @@ impl App {
         let Some((source, flat)) = easyeffects::playing() else {
             return;
         };
+        // Flat is the tree's first node, where the cursor already starts.
+        if flat {
+            self.flat = true;
+            return;
+        }
         let Some(path) = self.tree.reveal(&source) else {
             return;
         };
@@ -116,7 +121,6 @@ impl App {
                 saved: preset.clone(),
                 draft: preset,
             });
-            self.flat = flat;
         }
     }
 
